@@ -1,10 +1,13 @@
 
 use iced::widget::text::Span;
-use iced::{ Element, Font, color, Length, Border };
+use iced::{ Element, Font, color, Length, Border, Padding };
 use iced::font::{ Weight };
 use iced::widget::{ pane_grid, text, column, span, container, scrollable, text::Rich };
 
 use rand::prelude::*;
+
+mod list;
+use list::{ list };
 
 fn main() -> iced::Result {
 	iced::application(AdiFE::default, AdiFE::update, AdiFE::view)
@@ -103,7 +106,7 @@ impl TextBB {
 // Dummy code data
 // ------------------------------------------------------------------------------------------------
 
-const NUM_CODE_SPANS: usize = 1000;
+const NUM_CODE_SPANS: usize = 2700;
 
 const MNEMONICS: &[&'static str] = &[
 	"lda", "sta", "bpl", "jsr", "rts", "dex", "pha",
@@ -174,17 +177,20 @@ impl NamesPane {
 // ------------------------------------------------------------------------------------------------
 
 struct CodePane {
-	bbs: Vec<TextBB>,
+	content: list::Content<TextBB>,
 }
 
 impl CodePane {
 	fn new() -> Self {
-		Self { bbs: dummy_code_data().to_vec() }
+		Self { content: list::Content::with_items(dummy_code_data().to_vec()) }
 	}
 
 	fn view(&self) -> (Element<'_, Message>, String) {
-		let ui = container(scrollable(column(
-			self.bbs.iter().map(|bb| {
+		let ui = container(scrollable(list(
+			&self.content,
+			|idx, bb: &TextBB| {
+				println!("manifesting bb #{}", idx);
+
 				container(Rich::with_spans(bb.render())
 					.on_link_click(CodeLink::into_message)
 					.font(CONSOLAS_FONT.bold())
@@ -196,10 +202,10 @@ impl CodePane {
 				})
 				.into()
 			})
-		)))
+		))
 		.width(Length::Fill)
 		.height(Length::Fill)
-		.padding(10)
+		.padding(Padding::from([0, 10]))
 		.style(move |_theme| {
 			container::Style::default().background(color!(0x101010))
 		});
