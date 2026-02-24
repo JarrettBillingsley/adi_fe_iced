@@ -24,6 +24,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "iced_core",
+ "ordered-float",
  "rand",
 ]
 

@@ -1,13 +1,17 @@
 
-use iced::widget::text::Span;
+use std::collections::{ BTreeMap, VecDeque };
+use std::ops::{ Bound };
+use std::cell::{ RefCell, Ref, RefMut };
+
+use iced::widget::text::{ Span };
 use iced::{ Element, Font, color, Length, Border, Padding };
 use iced::font::{ Weight };
-use iced::widget::{ pane_grid, text, column, span, container, scrollable, text::Rich };
+use iced::widget::{ pane_grid, text, column, row, span, container, scrollable, text::Rich, button };
 
 use rand::prelude::*;
 
-mod list;
-use list::{ list };
+mod sparse_list;
+use sparse_list::{ sparse_list, IContent, NewChange };
 
 fn main() -> iced::Result {
 	iced::application(AdiFE::default, AdiFE::update, AdiFE::view)
@@ -44,6 +48,10 @@ enum Message {
 	PaneDragged(pane_grid::DragEvent),
 	PaneResized(pane_grid::ResizeEvent),
 	OperandClicked { ea: usize, opn: usize },
+
+	SplitBB { ea: usize },
+	DeleteBB { ea: usize },
+	ModifyBB { ea: usize },
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -69,7 +77,7 @@ impl CodeLink {
 // TextBB
 // ------------------------------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct TextBB {
 	ea: usize,
 	code: Vec<(String, String)> // mnemonic, operand
@@ -106,7 +114,7 @@ impl TextBB {
 // Dummy code data
 // ------------------------------------------------------------------------------------------------
 
-const NUM_CODE_SPANS: usize = 2700;
+const NUM_CODE_SPANS: usize = 30;
 
 const MNEMONICS: &[&'static str] = &[
 	"lda", "sta", "bpl", "jsr", "rts", "dex", "pha",
@@ -176,25 +184,160 @@ impl NamesPane {
 // CodePane
 // ------------------------------------------------------------------------------------------------
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SpanKind {
+	Unk,
+	Code(usize),
+	Data,
+	Ana,
+	AnaCode,
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub struct AdiSpan {
+	seg:   u16,
+	start: usize,
+	end:   usize,
+	kind:  SpanKind,
+}
+
+struct DummySegment {
+	end: usize,
+	bbs: BTreeMap<usize, AdiSpan>,
+	changes: RefCell<VecDeque<NewChange>>,
+}
+
+impl DummySegment {
+	fn new() -> Self {
+		Self {
+			end: 0x10000,
+			bbs: dummy_code_data().iter().enumerate().map(|(i, bb)| {
+				(bb.ea,
+				AdiSpan {
+					seg: 0,
+					start: bb.ea,
+					end: bb.ea + bb.code.len(),
+					kind: SpanKind::Code(i),
+				})
+			}).collect(),
+			changes: RefCell::new(VecDeque::new()),
+		}
+	}
+}
+
+impl<'a> IContent<'a, AdiSpan> for DummySegment {
+	fn len(&self) -> usize {
+		self.bbs.len()
+	}
+
+	fn domain(&self) -> usize {
+		self.end
+	}
+
+	fn first(&self) -> Option<usize> {
+		self.bbs.keys().copied().nth(0)
+	}
+
+	fn last(&self) -> Option<usize> {
+		self.bbs.keys().copied().nth_back(0)
+	}
+
+	fn get(&self, idx: usize) -> Option<&AdiSpan> {
+		self.bbs.get(&idx)
+	}
+
+	fn items_before(&'a self, idx: usize)
+	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
+		let mut iter = self.bbs.range(..= idx);
+		iter.next_back();
+		Box::new(iter.map(|(idx, span)| (*idx, span)))
+	}
+
+	fn items_after(&'a self, idx: usize)
+	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
+		Box::new(self.bbs.range((Bound::Excluded(idx), Bound::Unbounded))
+			.map(|(idx, span)| (*idx, span)))
+	}
+
+	fn items_at_and_before(&'a self, idx: usize)
+	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
+		let iter = self.bbs.range(..= idx);
+		Box::new(iter.map(|(idx, span)| (*idx, span)))
+	}
+
+	fn items_at_and_after(&'a self, idx: usize)
+	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
+		Box::new(self.bbs.range((Bound::Included(idx), Bound::Unbounded))
+			.map(|(idx, span)| (*idx, span)))
+	}
+
+	fn insert(&mut self, idx: usize, val: AdiSpan) -> Option<AdiSpan> {
+		let ret = self.bbs.insert(idx, val.clone());
+
+		match ret {
+			None =>
+				self.changes.borrow_mut().push_back(NewChange::Added { idx }),
+			Some(ref old) if *old != val =>
+				self.changes.borrow_mut().push_back(NewChange::Changed { idx }),
+			_ => {}
+		}
+
+		ret
+	}
+
+	fn remove(&mut self, idx: usize) -> bool {
+		let ret = self.bbs.remove(&idx).is_some();
+
+		if ret {
+			self.changes.borrow_mut().push_back(NewChange::Removed { idx });
+		}
+
+		ret
+	}
+
+	fn changes(&'a self) -> Ref<'a, VecDeque<NewChange>> {
+		self.changes.borrow()
+	}
+
+	fn changes_mut(&'a self) -> RefMut<'a, VecDeque<NewChange>> {
+		self.changes.borrow_mut()
+	}
+}
+
 struct CodePane {
-	content: list::Content<TextBB>,
+	seg: DummySegment,
 }
 
 impl CodePane {
 	fn new() -> Self {
-		Self { content: list::Content::with_items(dummy_code_data().to_vec()) }
+		Self {
+			seg: DummySegment::new(),
+			// content: sparse_list::Content::with_items(0x10000, dummy_code_data().to_vec())
+		}
 	}
 
 	fn view(&self) -> (Element<'_, Message>, String) {
-		let ui = container(scrollable(list(
-			&self.content,
-			|idx, bb: &TextBB| {
-				println!("manifesting bb #{}", idx);
+		let ui = container(scrollable(sparse_list(
+			&self.seg,
+			|ea, span: &AdiSpan| {
+				println!("manifesting bb @ ea {:04X}", ea);
 
-				container(Rich::with_spans(bb.render())
-					.on_link_click(CodeLink::into_message)
-					.font(CONSOLAS_FONT.bold())
-				)
+				let SpanKind::Code(bbidx) = span.kind else { panic!() };
+
+				let bb = &dummy_code_data()[bbidx];
+
+				container(column![
+					row![
+						button("split" ).on_press(Message::SplitBB { ea }),
+						iced::widget::space::Space::new().width(10),
+						button("delete").on_press(Message::DeleteBB { ea }),
+						iced::widget::space::Space::new().width(10),
+						button("modify").on_press(Message::ModifyBB { ea }),
+					],
+					Rich::with_spans(bb.render())
+						.on_link_click(CodeLink::into_message)
+						.font(CONSOLAS_FONT.bold())
+				])
 				.width(Length::Fill)
 				.style(move |_theme| {
 					container::Style::default().border(
@@ -269,6 +412,10 @@ impl AdiFE {
 			Message::OperandClicked { ea, opn } => {
 				println!("clicked operand {} of instruction at {:04X}", opn, ea);
 			}
+
+			Message::SplitBB  { ea } => println!("split bb @ {:04X}", ea),
+			Message::DeleteBB { ea } => println!("delete bb @ {:04X}", ea),
+			Message::ModifyBB { ea } => println!("modify bb @ {:04X}", ea),
 		}
 	}
 
