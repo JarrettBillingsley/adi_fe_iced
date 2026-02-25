@@ -54,11 +54,11 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
         }
     }
 
-    fn make_new_element(&self, idx: usize) -> Element<'a, Message, Theme, Renderer> {
+    fn new_element(&self, idx: usize) -> Element<'a, Message, Theme, Renderer> {
         (self.view_item)(idx, &self.content.get(idx).unwrap())
     }
 
-    fn make_new_element_with(&self, limits: &layout::Limits, renderer: &Renderer, idx: usize,
+    fn new_element_with(&self, limits: &layout::Limits, renderer: &Renderer, idx: usize,
     item: &'a T, y: f32) -> (Element<'a, Message, Theme, Renderer>, Tree, layout::Node) {
         let mut element = (self.view_item)(idx, item);
         let mut tree = Tree::new(&element);
@@ -75,13 +75,12 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
         println!("processing changed item at {}", idx);
 
         // See if the changed element is visible right now
-        let visible_index = state.visible_layouts.iter()
-            .position(|(i, _, _)| *i == idx);
+        let visible_index = state.visible_index_of(idx);
 
         // Compute its new layout
         let new_layout = {
             // Create the new element
-            let mut new_element = self.make_new_element(idx);
+            let mut new_element = self.new_element(idx);
 
             let mut new_tree;
 
@@ -106,90 +105,51 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
         let new_size = new_layout.size();
 
-        let height_difference = new_size.height
-            - (state.offset_after(idx) - state.offset_of(idx));
+        let height_difference = new_size.height - state.height_of(idx);
 
         // Move everything after it up/down
-        for offset in state.offsets_after_mut(idx) {
-            *offset += height_difference;
-        }
+        state.slide_offsets_after(idx, height_difference);
 
         // Update its width
-        let original_width = *state.widths.get(&idx).unwrap();
-        state.widths.insert(idx, new_size.width);
+        state.set_width(idx, new_size.width);
 
         if let Some(visible_index) = visible_index {
             // If it's visible, update the visible layout and the layouts of
             // everything after it.
             state.visible_layouts[visible_index].1 = new_layout;
-
-            for (i, layout, _) in &mut state.visible_layouts[visible_index..] {
-                layout.move_to_mut((0.0, *state.offsets.get(i).unwrap()));
-            }
+            state.slide_layouts_after(visible_index);
         } else if let Some(first_visible) = state.visible_layouts.first() {
             // Otherwise, if it's not visible but it's before the first visible
             // item, update their layouts.
-            let first_visible_index = first_visible.0;
-            if idx < first_visible_index {
-                for (i, layout, _) in &mut state.visible_layouts[..] {
-                    layout.move_to_mut((0.0, *state.offsets.get(i).unwrap()));
-                }
+            if idx < first_visible.0 {
+                state.slide_layouts_after(0);
             }
         }
-
-        state.change_size(height_difference, original_width, new_size.width);
     }
 
     // _renderer will be used once we implement proper layout recomputation
     fn item_removed(&mut self, state: &mut State, _renderer: &Renderer, idx: usize) {
         println!("processing removal of item at {}", idx);
-        // compute height of removed item
-        let height = state.offset_after(idx) - state.offset_of(idx);
 
-        // get and remove width of removed item
-        let original_width = state.widths.remove(&idx)
-            .expect("width should have been there");
-
-        // remove offset of removed item, and shift everything below it up
-        for offset in state.offsets_after_mut(idx) {
-            *offset -= height;
-        }
-
-        let _ = state.remove_offset(idx);
-
-        // TODO: Smarter visible layout partial updates
-        // clear out the visible layouts
+        state.remove_width(idx);
+        state.remove_offset(idx);
         state.visible_layouts.clear();
-
-        state.change_size(-height, original_width, 0.0);
     }
 
     fn item_added(&mut self, state: &mut State, renderer: &Renderer, idx: usize) {
         println!("processing newly-added item at {}", idx);
         // compute the size
-        let size = {
-            let mut new_element = self.make_new_element(idx);
-            let mut tree = Tree::new(&new_element);
+        let size = self.new_element_with(
+            &state.last_limits,
+            renderer,
+            idx,
+            &self.content.get(idx).unwrap(),
+            0.0
+        ).2.size();
 
-            let layout = new_element.as_widget_mut().layout(
-                &mut tree,
-                renderer,
-                &state.last_limits,
-            );
-
-            layout.size()
-        };
-
-        // TODO: Smarter visible layout partial updates
-        // clear out the visible layouts
-        state.visible_layouts.clear();
-
-        // insert the width and new item's offset into the state
-        state.widths.insert(idx, size.width);
+        state.set_width(idx, size.width);
         state.add_offset(idx, size.height);
-
-        // compute the total width and height
-        state.change_size(size.height, 0.0, size.width);
+        state.visible_layouts.clear();
     }
 
     fn update_task(&mut self, state: &mut State, renderer: &Renderer) {
@@ -211,20 +171,20 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
                 let mut last_idx = *current;
 
                 for (idx, item) in batch {
-                    let bounds = self.make_new_element_with(
+                    let size = self.new_element_with(
                         &state.last_limits,
                         renderer,
                         idx,
                         &item,
                         accumulated_height
-                    ).2.bounds();
+                    ).2.size();
 
-                    max_width = max_width.max(bounds.width);
+                    max_width = max_width.max(size.width);
 
                     offsets.insert(idx, accumulated_height);
-                    widths.insert(idx, bounds.width);
+                    widths.insert(idx, size.width);
 
-                    accumulated_height += bounds.height;
+                    accumulated_height += size.height;
                     last_idx = idx;
                 }
 
@@ -287,8 +247,10 @@ impl State {
         self.is_new = false;
     }
 
-    fn is_new(&self) -> bool {
-        self.is_new
+    fn recompute_if_new(&mut self) {
+        if self.is_new {
+            self.recompute();
+        }
     }
 
     fn offset_of(&self, idx: usize) -> f32 {
@@ -300,52 +262,93 @@ impl State {
             .next().expect("no item after").1
     }
 
-    fn offsets_after_mut(&mut self, idx: usize) -> impl Iterator<Item = &mut f32> {
-        self.offsets.range_mut((Bound::Excluded(idx), Bound::Unbounded))
-            .map(|(_, o)| o)
+    fn height_of(&self, idx: usize) -> f32 {
+        self.offset_after(idx) - self.offset_of(idx)
     }
 
+    fn offsets_after_mut(&mut self, idx: usize) -> impl Iterator<Item = &mut f32> {
+        self.offsets.range_mut((Bound::Excluded(idx), Bound::Unbounded)).map(|(_, o)| o)
+    }
+
+    fn slide_offsets_after(&mut self, idx: usize, delta: f32) {
+        for offset in self.offsets_after_mut(idx) {
+            *offset += delta;
+        }
+
+        self.size.height += delta;
+    }
+
+    fn slide_layouts_after(&mut self, idx: usize) {
+        for (i, layout, _) in &mut self.visible_layouts[idx..] {
+            layout.move_to_mut((0.0, *self.offsets.get(i).unwrap()));
+        }
+    }
+
+    /// removes an offset at the given index. automatically determines the item's height based on
+    /// existing items and moves the offsets of all items after it up.
     fn remove_offset(&mut self, idx: usize) {
+        let height = self.height_of(idx);
         self.offsets.remove(&idx).expect("removed an offset that didn't exist");
+        self.slide_offsets_after(idx, -height);
+    }
+
+    fn visible_index_of(&self, idx: usize) -> Option<usize> {
+        self.visible_layouts.iter().position(|(i, _, _)| *i == idx)
+    }
+
+    fn first_visible_index(&self) -> Option<usize> {
+        self.visible_layouts.first().map(|(idx, _, _)| *idx)
     }
 
     /// adds an offset at the given index with the given height. automatically determines the new
     /// item's offset based on existing items and updates the offsets of all items after it.
     fn add_offset(&mut self, idx: usize, height: f32) {
         // find offset of item right after idx
-        let prev_offset =
-            *self.offsets.range((Bound::Excluded(idx), Bound::Unbounded))
-            .next()
-            .expect("is idx >= domain??")
-            .1;
+        let prev_offset = self.offset_after(idx);
 
         // idx must not exist in self.offsets already (cause that'd be a bug...)
         assert!(self.offsets.insert(idx, prev_offset).is_none());
 
         // then add height to everything after idx
-        for (_, offset) in self.offsets.range_mut((Bound::Excluded(idx), Bound::Unbounded)) {
-            *offset += height;
+        self.slide_offsets_after(idx, height);
+    }
+
+    // sets the width of a new or existing item.
+    fn set_width(&mut self, idx: usize, new_width: f32) {
+        if let Some(original_width) = self.widths.insert(idx, new_width) {
+            if new_width < original_width {
+                self.minimize_width(original_width);
+                return;
+            }
+        }
+
+        self.size.width = self.size.width.max(new_width);
+    }
+
+    fn remove_width(&mut self, idx: usize) {
+        let original_width = self.widths.remove(&idx)
+            .expect("width should have been there");
+
+        self.minimize_width(original_width);
+    }
+
+    fn minimize_width(&mut self, original_width: f32) {
+        if original_width == self.size.width {
+            self.size.width = self.widths.values().fold(
+                0.0,
+                |current, candidate| {
+                    current.max(*candidate)
+                },
+            );
         }
     }
 
-    // adds `height_difference` to `state.size.height`, and recomputes the total width assuming
-    // an item of size `original_width` was removed.
-    fn change_size(&mut self, height_difference: f32, original_width: f32, new_width: f32) {
-        self.size.height += height_difference;
-
-        if new_width < original_width {
-            if original_width == self.size.width {
-                self.size.width = self.widths.values().fold(
-                    0.0,
-                    |current, candidate| {
-                        current.max(*candidate)
-                    },
-                );
-            }
-        } else if new_width > original_width {
-            self.size.width = self.size.width.max(new_width);
+    fn update_limits(&mut self, loose_limits: layout::Limits) {
+        if self.last_limits != loose_limits {
+            // the original implementation just completely wiped out everything here, forcing a
+            // recomputation of every single item in the list, and I'm not really sure why.
+            self.last_limits = loose_limits;
         }
-        // else, do nothing - width didn't change
     }
 }
 
@@ -381,13 +384,7 @@ where
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits)
     -> layout::Node {
         let state = tree.state.downcast_mut::<State>();
-        let loose_limits = limits.loose();
-
-        if state.last_limits != loose_limits {
-            // the original implementation just completely wiped out everything here, forcing a
-            // recomputation of every single item in the list, and I'm not really sure why.
-            state.last_limits = loose_limits;
-        }
+        state.update_limits(limits.loose());
 
         let mut changes = self.content.changes_mut();
 
@@ -412,15 +409,9 @@ where
         }
 
         // Recompute if new
-        if state.is_new() {
-            state.recompute();
-        }
-
+        state.recompute_if_new();
         self.update_task(state, renderer);
-
-        let intrinsic_size = Size::new(state.size.width, state.size.height);
-        let size = limits.resolve(Length::Shrink, Length::Shrink, intrinsic_size);
-        layout::Node::new(size)
+        layout::Node::new(limits.resolve(Length::Shrink, Length::Shrink, state.size))
     }
 
     fn update(
@@ -502,7 +493,7 @@ where
                 self.visible_elements = state
                     .visible_layouts
                     .iter()
-                    .map(|(idx, _, _)| self.make_new_element(*idx))
+                    .map(|(idx, _, _)| self.new_element(*idx))
                     .collect();
             }
 
@@ -520,18 +511,16 @@ where
                 .take_while(|(idx, _, _)| *idx >= end_idx)
                 .count();
 
-            let _ = self.visible_elements.splice(..top, []);
-            let _ = state.visible_layouts.splice(..top, []);
+            self.visible_elements.splice(..top, []);
+            state.visible_layouts.splice(..top, []);
 
-            let _ = self
-                .visible_elements
+            self.visible_elements
                 .splice(self.visible_elements.len() - bottom.., []);
-            let _ = state
-                .visible_layouts
+            state.visible_layouts
                 .splice(state.visible_layouts.len() - bottom.., []);
 
             // Prepend new visible elements
-            if let Some(first_visible) = state.visible_layouts.first().map(|(idx, _, _)| *idx) {
+            if let Some(first_visible) = state.first_visible_index() {
                 if start_idx < first_visible {
                     for (i, (idx, item)) in self.content.items_at_and_after(start_idx).enumerate() {
                         if idx >= first_visible {
@@ -539,7 +528,7 @@ where
                         }
 
                         let (element, tree, layout) =
-                            self.make_new_element_with(&state.last_limits, renderer, idx, item,
+                            self.new_element_with(&state.last_limits, renderer, idx, item,
                                 state.offset_of(idx));
                         state.visible_layouts.insert(i, (idx, layout, tree));
                         self.visible_elements.insert(i, element);
@@ -561,7 +550,7 @@ where
                     }
 
                     let (element, tree, layout) =
-                        self.make_new_element_with(&state.last_limits, renderer, idx, item,
+                        self.new_element_with(&state.last_limits, renderer, idx, item,
                             state.offset_of(idx));
                     state.visible_layouts.push((idx, layout, tree));
                     self.visible_elements.push(element);
