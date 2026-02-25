@@ -13,7 +13,7 @@ use better_panic::{ Settings as PanicSettings, Verbosity as PanicVerbosity };
 use rand::prelude::*;
 
 mod sparse_list;
-use sparse_list::{ sparse_list, IContent, NewChange };
+use sparse_list::{ sparse_list, IContent, Change as ListChange };
 
 fn main() -> iced::Result {
 	setup_panic();
@@ -221,7 +221,7 @@ struct DummySegment {
 	end: usize,
 	bbs: Vec<TextBB>,
 	spans: BTreeMap<usize, AdiSpan>,
-	changes: RefCell<VecDeque<NewChange>>,
+	changes: RefCell<VecDeque<ListChange>>,
 }
 
 impl DummySegment {
@@ -288,7 +288,7 @@ impl DummySegment {
 		let SpanKind::Code(bbidx) = span.kind else { panic!() };
 		let bb = &mut self.bbs[bbidx];
 		bb.code.push(("FUCK".into(), "123".into()));
-		self.changes.borrow_mut().push_back(NewChange::Changed { idx: ea });
+		self.changes.borrow_mut().push_back(ListChange::Changed { idx: ea });
 	}
 }
 
@@ -343,9 +343,9 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 
 		match ret {
 			None =>
-				self.changes.borrow_mut().push_back(NewChange::Added { idx }),
+				self.changes.borrow_mut().push_back(ListChange::Added { idx }),
 			Some(ref old) if *old != val =>
-				self.changes.borrow_mut().push_back(NewChange::Changed { idx }),
+				self.changes.borrow_mut().push_back(ListChange::Changed { idx }),
 			_ => {}
 		}
 
@@ -356,17 +356,17 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 		let ret = self.spans.remove(&idx).is_some();
 
 		if ret {
-			self.changes.borrow_mut().push_back(NewChange::Removed { idx });
+			self.changes.borrow_mut().push_back(ListChange::Removed { idx });
 		}
 
 		ret
 	}
 
-	fn changes(&'a self) -> Ref<'a, VecDeque<NewChange>> {
+	fn changes(&'a self) -> Ref<'a, VecDeque<ListChange>> {
 		self.changes.borrow()
 	}
 
-	fn changes_mut(&'a self) -> RefMut<'a, VecDeque<NewChange>> {
+	fn changes_mut(&'a self) -> RefMut<'a, VecDeque<ListChange>> {
 		self.changes.borrow_mut()
 	}
 }
@@ -487,6 +487,7 @@ impl PaneState {
 
 struct AdiFE {
 	panes: pane_grid::State<PaneState>,
+	#[allow(dead_code)]
 	name_pane: pane_grid::Pane,
 	code_pane: pane_grid::Pane,
 }

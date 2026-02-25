@@ -34,7 +34,6 @@ dependencies = [
  "better-panic",
  "iced",
  "iced_core",
- "ordered-float",
  "rand",
 ]
 
