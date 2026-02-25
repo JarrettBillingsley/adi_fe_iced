@@ -80,61 +80,19 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
     fn item_changed(&mut self, state: &mut State, renderer: &Renderer, idx: usize) {
         println!("processing changed item at {}", idx);
 
-        // See if the changed element is visible right now
-        let visible_index = state.visible_index_of(idx);
+        let size = self.layout_element(&state.last_limits, renderer, 0.0, self.new_element(idx))
+            .2.size();
 
-        // Compute its new layout
-        let new_layout = {
-            // Create the new element
-            let mut new_element = self.new_element(idx);
+        state.set_width(idx, size.width);
+        state.set_offset(idx, size.height);
 
-            let mut new_tree;
-
-            let tree = if let Some(visible_index) = visible_index {
-                // If it's currently visible, diff its tree and mark
-                // visible_outdated = true so the visible elements will be
-                // rebuilt from the visible_layouts on the next redraw
-                let (_, _, tree) = &mut state.visible_layouts[visible_index];
-                tree.diff(&new_element);
-                state.visible_outdated = true;
-                tree
-            } else {
-                // Otherwise, make a new tree for it
-                new_tree = Tree::new(&new_element);
-                &mut new_tree
-            };
-
-            new_element
-                .as_widget_mut()
-                .layout(tree, renderer, &state.last_limits)
-        };
-
-        let new_size = new_layout.size();
-
-        let height_difference = new_size.height - state.height_of(idx);
-
-        // Move everything after it up/down
-        state.slide_offsets_after(idx, height_difference);
-
-        // Update its width
-        state.set_width(idx, new_size.width);
-
-        if let Some(visible_index) = visible_index {
-            // If it's visible, update the visible layout and the layouts of
-            // everything after it.
-            state.visible_layouts[visible_index].1 = new_layout;
-            state.slide_layouts_after(visible_index);
-        } else if let Some(first_visible) = state.visible_layouts.first() {
-            // Otherwise, if it's not visible but it's before the first visible
-            // item, update their layouts.
-            if idx < first_visible.0 {
-                state.slide_layouts_after(0);
-            }
-        }
+        // it may seem wasteful to clear the visible layouts, buuuuuuut the SparseList widget itself
+        // is usually recreated every time these methods are called, meaning visible_elements is
+        // empty, meaning visible_layouts needs to be recomputed anyway.
+        state.visible_layouts.clear();
     }
 
-    // _renderer will be used once we implement proper layout recomputation
-    fn item_removed(&mut self, state: &mut State, _renderer: &Renderer, idx: usize) {
+    fn item_removed(&mut self, state: &mut State, idx: usize) {
         println!("processing removal of item at {}", idx);
 
         state.remove_width(idx);
@@ -149,7 +107,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
             .2.size();
 
         state.set_width(idx, size.width);
-        state.add_offset(idx, size.height);
+        state.set_offset(idx, size.height);
         state.visible_layouts.clear();
     }
 
@@ -274,12 +232,6 @@ impl State {
         self.size.height += delta;
     }
 
-    fn slide_layouts_after(&mut self, idx: usize) {
-        for (i, layout, _) in &mut self.visible_layouts[idx..] {
-            layout.move_to_mut((0.0, *self.offsets.get(i).unwrap()));
-        }
-    }
-
     /// removes an offset at the given index. automatically determines the item's height based on
     /// existing items and moves the offsets of all items after it up.
     fn remove_offset(&mut self, idx: usize) {
@@ -288,25 +240,27 @@ impl State {
         self.slide_offsets_after(idx, -height);
     }
 
-    fn visible_index_of(&self, idx: usize) -> Option<usize> {
-        self.visible_layouts.iter().position(|(i, _, _)| *i == idx)
-    }
-
     fn first_visible_index(&self) -> Option<usize> {
         self.visible_layouts.first().map(|(idx, _, _)| *idx)
     }
 
-    /// adds an offset at the given index with the given height. automatically determines the new
-    /// item's offset based on existing items and updates the offsets of all items after it.
-    fn add_offset(&mut self, idx: usize, height: f32) {
+    /// adds or changes an offset at the given index to the given height. automatically determines
+    /// the new item's offset based on existing items and updates the offsets of all items after
+    /// it.
+    fn set_offset(&mut self, idx: usize, new_height: f32) {
         // find offset of item right after idx
-        let prev_offset = self.offset_after(idx);
+        let offset_after = self.offset_after(idx);
 
-        // idx must not exist in self.offsets already (cause that'd be a bug...)
-        assert!(self.offsets.insert(idx, prev_offset).is_none());
+        let delta = if let Some(cur_offset) = self.offsets.get(&idx) {
+            let old_height = offset_after - cur_offset;
+            let height_difference = new_height - old_height;
+            height_difference
+        } else {
+            self.offsets.insert(idx, offset_after);
+            new_height
+        };
 
-        // then add height to everything after idx
-        self.slide_offsets_after(idx, height);
+        self.slide_offsets_after(idx, delta);
     }
 
     // sets the width of a new or existing item.
@@ -389,7 +343,7 @@ where
                 while let Some(change) = changes.pop_front() {
                     match change {
                         Change::Changed { idx } => self.item_changed(state, renderer, idx),
-                        Change::Removed { idx } => self.item_removed(state, renderer, idx),
+                        Change::Removed { idx } => self.item_removed(state, idx),
                         Change::Added   { idx } => self.item_added  (state, renderer, idx),
                     }
                 }
@@ -691,24 +645,29 @@ pub enum Change {
 }
 
 pub trait IContent<'a, V: 'a> {
+    // TODO: not needed?
     /// how many items there are; always <= `domain()`
     fn len(&self) -> usize;
 
+    // TODO: not needed?
     /// true if `self.len() == 0`
     fn is_empty(&self) -> bool { self.len() == 0 }
 
     /// the valid domain of indexes `[0 .. domain)`, but not every index need be present
     fn domain(&self) -> usize;
 
+    // TODO: not needed?
     /// return the first valid index, or `None` if there are no valid indices
     fn first(&self) -> Option<usize>;
 
+    // TODO: not needed?
     /// return the last valid index, or `None` if there are no valid indices
     fn last(&self) -> Option<usize>;
 
     /// get the item with the given index, if it exists
     fn get(&self, idx: usize) -> Option<&V>;
 
+    // TODO: not needed?
     /// return an iterator over the items before (and not including) the item at `idx`
     fn items_before(&'a self, idx: usize)
         -> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
@@ -717,6 +676,7 @@ pub trait IContent<'a, V: 'a> {
     fn items_after(&'a self, idx: usize)
         -> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
 
+    // TODO: not needed?
     /// return an iterator over the items before and including the item at `idx`
     fn items_at_and_before(&'a self, idx: usize)
         -> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
@@ -725,14 +685,17 @@ pub trait IContent<'a, V: 'a> {
     fn items_at_and_after(&'a self, idx: usize)
         -> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
 
+    // TODO: not needed?
     /// set the item at the given index to the given value. if `idx` was not present, returns
     /// `None`; otherwise, returns the old value at this index.
     fn insert(&mut self, idx: usize, val: V) -> Option<V>;
 
+    // TODO: not needed?
     /// try to remove the item at the given index; returns `true` if there was an item there and
     /// `false` if there wasn't
     fn remove(&mut self, idx: usize) -> bool;
 
+    // TODO: not needed?
     /// get the queue of changes which have occurred.
     fn changes(&'a self) -> Ref<'a, VecDeque<Change>>;
 
