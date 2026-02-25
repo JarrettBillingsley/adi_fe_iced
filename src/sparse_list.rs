@@ -126,13 +126,9 @@ impl State {
             .map(|(_, o)| o)
     }
 
-    fn remove_offset_after(&mut self, idx: usize) {
-        let mut iter = self.offsets.range(idx ..);
-        assert!(*iter.next().unwrap().0 == idx);
-        let (&next_idx, &_) = iter.next().expect("no item after");
-
-        self.offsets.remove(&next_idx);
-        // self.offsets_rev.remove(&notnan(next_val));
+    fn remove_offset(&mut self, idx: usize) {
+        self.offsets.remove(&idx).expect("removed an offset that didn't exist");
+        // self.offsets_rev.remove(SOMETHING);
     }
 
     /// adds an offset at the given index with the given height. automatically determines the new
@@ -155,6 +151,26 @@ impl State {
         for (_, offset) in self.offsets.range_mut((Bound::Excluded(idx), Bound::Unbounded)) {
             *offset += height;
         }
+    }
+
+    // adds `height_difference` to `state.size.height`, and recomputes the total width assuming
+    // an item of size `original_width` was removed.
+    fn change_size(&mut self, height_difference: f32, original_width: f32, new_width: f32) {
+        self.size.height += height_difference;
+
+        if new_width < original_width {
+            if original_width == self.size.width {
+                self.size.width = self.widths.values().fold(
+                    0.0,
+                    |current, candidate| {
+                        current.max(*candidate)
+                    },
+                );
+            }
+        } else if new_width > original_width {
+            self.size.width = self.size.width.max(new_width);
+        }
+        // else, do nothing - width didn't change
     }
 }
 
@@ -207,116 +223,103 @@ where
             Task::Idle => {
                 while let Some(change) = changes.pop_front() {
                     match change {
-                        NewChange::Changed { idx: original } => {
-                            let mut new_element = (self.view_item)(
-                                original,
-                                &self.content.get(original).unwrap(),
-                            );
+                        NewChange::Changed { idx } => {
+                            println!("processing changed item at {}", idx);
 
+                            // See if the changed element is visible right now
                             let visible_index = state
                                 .visible_layouts
                                 .iter_mut()
-                                .position(|(i, _, _)| *i == original);
+                                .position(|(i, _, _)| *i == idx);
 
-                            let mut new_tree;
+                            // Compute its new layout
+                            let new_layout = {
+                                // Create the new element
+                                let mut new_element = (self.view_item)(
+                                    idx,
+                                    &self.content.get(idx).unwrap(),
+                                );
 
-                            // Update if visible
-                            let tree =
-                                if let Some(visible_index) = visible_index {
-                                    let (_i, _layout, tree) = &mut state
-                                        .visible_layouts[visible_index];
+                                let mut new_tree;
 
+                                let tree = if let Some(visible_index) = visible_index {
+                                    // If it's currently visible, diff its tree and mark
+                                    // visible_outdated = true so the visible elements will be
+                                    // rebuilt from the visible_layouts on the next redraw
+                                    let (_, _, tree) = &mut state.visible_layouts[visible_index];
                                     tree.diff(&new_element);
                                     state.visible_outdated = true;
-
                                     tree
                                 } else {
+                                    // Otherwise, make a new tree for it
                                     new_tree = Tree::new(&new_element);
-
                                     &mut new_tree
                                 };
 
-                            let new_layout = new_element
-                                .as_widget_mut()
-                                .layout(tree, renderer, &state.last_limits);
+                                new_element
+                                    .as_widget_mut()
+                                    .layout(tree, renderer, &state.last_limits)
+                            };
 
                             let new_size = new_layout.size();
 
                             let height_difference = new_size.height
-                                - (state.offset_after(original) - state.offset_of(original));
+                                - (state.offset_after(idx) - state.offset_of(idx));
 
-                            for offset in state.offsets_after_mut(original) {
+                            // Move everything after it up/down
+                            for offset in state.offsets_after_mut(idx) {
                                 *offset += height_difference;
                             }
 
-                            let original_width = *state.widths.get(&original).unwrap();
-                            state.widths.insert(original, new_size.width);
+                            // Update its width
+                            let original_width = *state.widths.get(&idx).unwrap();
+                            state.widths.insert(idx, new_size.width);
 
                             if let Some(visible_index) = visible_index {
-                                state.visible_layouts[visible_index].1 =
-                                    new_layout;
+                                // If it's visible, update the visible layout and the layouts of
+                                // everything after it.
+                                state.visible_layouts[visible_index].1 = new_layout;
 
                                 for (i, layout, _) in &mut state.visible_layouts[visible_index..] {
                                     layout.move_to_mut((0.0, *state.offsets.get(i).unwrap()));
                                 }
-                            } else if let Some(first_visible) =
-                                state.visible_layouts.first()
-                            {
+                            } else if let Some(first_visible) = state.visible_layouts.first() {
+                                // Otherwise, if it's not visible but it's before the first visible
+                                // item, update their layouts.
                                 let first_visible_index = first_visible.0;
-                                if original < first_visible_index {
-                                    for (i, layout, _) in
-                                        &mut state.visible_layouts[..]
-                                    {
+                                if idx < first_visible_index {
+                                    for (i, layout, _) in &mut state.visible_layouts[..] {
                                         layout.move_to_mut((0.0, *state.offsets.get(i).unwrap()));
                                     }
                                 }
                             }
 
-                            state.size.height += height_difference;
-
-                            if original_width == state.size.width {
-                                state.size.width = state.widths.values().fold(
-                                    0.0,
-                                    |current, candidate| {
-                                        current.max(*candidate)
-                                    },
-                                );
-                            }
+                            state.change_size(height_difference, original_width, new_size.width);
                         }
-                        NewChange::Removed { idx: original } => {
+                        NewChange::Removed { idx } => {
+                            println!("processing removal of item at {}", idx);
                             // compute height of removed item
-                            let height = state.offset_after(original) - state.offset_of(original);
+                            let height = state.offset_after(idx) - state.offset_of(idx);
 
                             // get and remove width of removed item
-                            let original_width = state.widths.remove(&original)
+                            let original_width = state.widths.remove(&idx)
                                 .expect("width should have been there");
 
                             // remove offset of removed item, and shift everything below it up
-                            for offset in state.offsets_after_mut(original) {
+                            for offset in state.offsets_after_mut(idx) {
                                 *offset -= height;
                             }
 
-                            let _ = state.remove_offset_after(original);
+                            let _ = state.remove_offset(idx);
 
                             // TODO: Smarter visible layout partial updates
                             // clear out the visible layouts
                             state.visible_layouts.clear();
 
-                            // remove its height from the total height
-                            state.size.height -= height;
-
-                            // and recompute total width, if it was the thing possibly making the
-                            // total width as wide as it was
-                            if original_width == state.size.width {
-                                state.size.width = state.widths.values().fold(
-                                    0.0,
-                                    |current, candidate| {
-                                        current.max(*candidate)
-                                    },
-                                );
-                            }
+                            state.change_size(-height, original_width, 0.0);
                         }
                         NewChange::Added { idx } => {
+                            println!("processing newly-added item at {}", idx);
                             // compute the size
                             let size = {
                                 let mut new_element = (self.view_item)(
@@ -335,13 +338,16 @@ where
                                 layout.size()
                             };
 
+                            // TODO: Smarter visible layout partial updates
+                            // clear out the visible layouts
+                            state.visible_layouts.clear();
+
                             // insert the width and new item's offset into the state
                             state.widths.insert(idx, size.width);
                             state.add_offset(idx, size.height);
 
                             // compute the total width and height
-                            state.size.width = state.size.width.max(size.width);
-                            state.size.height += size.height;
+                            state.change_size(size.height, 0.0, size.width);
                         }
                     }
                 }
