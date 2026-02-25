@@ -55,12 +55,18 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
     }
 
     fn new_element(&self, idx: usize) -> Element<'a, Message, Theme, Renderer> {
-        (self.view_item)(idx, &self.content.get(idx).unwrap())
+        self.new_element_with(idx, &self.content.get(idx).unwrap())
     }
 
-    fn new_element_with(&self, limits: &layout::Limits, renderer: &Renderer, idx: usize,
-    item: &'a T, y: f32) -> (Element<'a, Message, Theme, Renderer>, Tree, layout::Node) {
-        let mut element = (self.view_item)(idx, item);
+    fn new_element_with(&self, idx: usize, item: &'a T) -> Element<'a, Message, Theme, Renderer> {
+        (self.view_item)(idx, item)
+    }
+
+    // passing the element in and returning it seems silly but BORROW CHECKER REASONS
+    // well, really, "lack of impl Borrow for &mut Element" reasons but same idea
+    fn layout_element(&self, limits: &layout::Limits, renderer: &Renderer, y: f32,
+    mut element: Element<'a, Message, Theme, Renderer>)
+    -> (Element<'a, Message, Theme, Renderer>, Tree, layout::Node) {
         let mut tree = Tree::new(&element);
 
         let layout = element
@@ -139,13 +145,8 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
     fn item_added(&mut self, state: &mut State, renderer: &Renderer, idx: usize) {
         println!("processing newly-added item at {}", idx);
         // compute the size
-        let size = self.new_element_with(
-            &state.last_limits,
-            renderer,
-            idx,
-            &self.content.get(idx).unwrap(),
-            0.0
-        ).2.size();
+        let size = self.layout_element(&state.last_limits, renderer, 0.0, self.new_element(idx))
+            .2.size();
 
         state.set_width(idx, size.width);
         state.add_offset(idx, size.height);
@@ -171,13 +172,8 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
                 let mut last_idx = *current;
 
                 for (idx, item) in batch {
-                    let size = self.new_element_with(
-                        &state.last_limits,
-                        renderer,
-                        idx,
-                        &item,
-                        accumulated_height
-                    ).2.size();
+                    let size = self.layout_element(&state.last_limits, renderer, accumulated_height,
+                        self.new_element_with(idx, &item)).2.size();
 
                     max_width = max_width.max(size.width);
 
@@ -527,9 +523,9 @@ where
                             break;
                         }
 
-                        let (element, tree, layout) =
-                            self.new_element_with(&state.last_limits, renderer, idx, item,
-                                state.offset_of(idx));
+                        let element = self.new_element_with(idx, item);
+                        let (element, tree, layout) = self.layout_element(&state.last_limits,
+                            renderer, state.offset_of(idx), element);
                         state.visible_layouts.insert(i, (idx, layout, tree));
                         self.visible_elements.insert(i, element);
                     }
@@ -549,9 +545,9 @@ where
                         break;
                     }
 
-                    let (element, tree, layout) =
-                        self.new_element_with(&state.last_limits, renderer, idx, item,
-                            state.offset_of(idx));
+                    let element = self.new_element_with(idx, item);
+                    let (element, tree, layout) = self.layout_element(&state.last_limits,
+                        renderer, state.offset_of(idx), element);
                     state.visible_layouts.push((idx, layout, tree));
                     self.visible_elements.push(element);
                 }
