@@ -6,7 +6,8 @@ use std::cell::{ RefCell, Ref, RefMut };
 use iced::widget::text::{ Span };
 use iced::{ Element, Font, color, Length, Border, Padding };
 use iced::font::{ Weight };
-use iced::widget::{ pane_grid, text, column, row, span, container, scrollable, text::Rich, button };
+use iced::widget::{ pane_grid, text, column, row, span, container, scrollable, text::Rich, button,
+	space };
 
 use better_panic::{ Settings as PanicSettings, Verbosity as PanicVerbosity };
 
@@ -130,7 +131,7 @@ impl TextBB {
 // Dummy code data
 // ------------------------------------------------------------------------------------------------
 
-const NUM_CODE_SPANS: usize = 2700;
+const NUM_CODE_SPANS: usize = 50;
 
 const MNEMONICS: &[&'static str] = &[
 	"lda", "sta", "bpl", "jsr", "rts", "dex", "pha",
@@ -383,7 +384,7 @@ impl CodePane {
 	}
 
 	fn view(&self) -> (Element<'_, Message>, String) {
-		let ui = container(scrollable(sparse_list(
+		let ui = container(sparse_list(
 			&self.seg,
 			|ea, span: &AdiSpan| {
 				println!("manifesting bb @ ea {:04X}", ea);
@@ -419,7 +420,7 @@ impl CodePane {
 				})
 				.into()
 			})
-		))
+		)
 		.width(Length::Fill)
 		.height(Length::Fill)
 		.padding(Padding::from([0, 10]))
@@ -521,19 +522,22 @@ impl AdiFE {
 	}
 
 	fn view(&self) -> Element<'_, Message> {
-		// trying to extract this callback into its own method is an exercise in frustration.
-		// just leave it here unless you want to have the Worst Types and Where Clauses Ever.
-		pane_grid(&self.panes, |_pane, state, _is_maximized| {
-			let (content, title) = state.view();
-			let title = text(title).size(20).font(Font::DEFAULT.bold());
+		column![
+			// trying to extract this callback into its own method is an exercise in frustration.
+			// just leave it here unless you want to have the Worst Types and Where Clauses Ever.
+			pane_grid(&self.panes, |_pane, state, _is_maximized| {
+				let (content, title) = state.view();
+				let title = text(title).size(20).font(Font::DEFAULT.bold());
 
-			pane_grid::Content::new(content)
-				.title_bar(pane_grid::TitleBar::new(title).padding(10))
-		})
-		.on_drag(Message::PaneDragged)
-		.on_resize(10, Message::PaneResized)
-		.min_size(200)
-		.into()
+				pane_grid::Content::new(content)
+					.title_bar(pane_grid::TitleBar::new(title).padding(10))
+			})
+			.on_drag(Message::PaneDragged)
+			.on_resize(10, Message::PaneResized)
+			.min_size(200),
+
+			space().height(50)
+		].into()
 	}
 }
 

@@ -1,19 +1,17 @@
 #![allow(missing_docs)]
-///! Taken from iced/list-widget-reloaded
+#![allow(unused)]
+///! Taken from iced/list-widget-reloaded's list.rs, mashed up with stuff from scrollable.rs
 
-use iced_core::event::{Event};
-use iced_core::layout;
-use iced_core::mouse;
-use iced_core::overlay;
-use iced_core::renderer;
-use iced_core::widget;
-use iced_core::widget::tree::{self, Tree};
-use iced_core::window;
 use iced_core::{
     self, Clipboard, Element, Layout, Length, Point, Rectangle, Shell,
-    Size, Vector, Widget,
+    Size, Vector, Widget, InputMethod,
+    event::{ Event }, layout, mouse, touch, overlay, renderer, window,
+    widget::{ self, operation, tree::{ self, Tree } },
 };
+use iced::keyboard;
+use iced::widget::scrollable::{ RelativeOffset, AbsoluteOffset };
 
+use std::time::{ Instant, Duration };
 use std::cell::{ Ref, RefMut };
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -165,10 +163,10 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 enum Task {
     Idle,
     Computing {
-        current:     usize,
-        offsets:     BTreeMap<usize, f32>,
-        widths:      BTreeMap<usize, f32>,
-        size:        Size,
+        current: usize,
+        offsets: BTreeMap<usize, f32>,
+        widths:  BTreeMap<usize, f32>,
+        size:    Size,
     },
 }
 
@@ -176,6 +174,120 @@ impl Task {
     fn is_computing(&self) -> bool {
         matches!(self, Task::Computing { .. })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Offset {
+    Absolute(f32),
+    Relative(f32),
+}
+
+impl Offset {
+    fn absolute(self, viewport: f32, content: f32) -> f32 {
+        match self {
+            Offset::Absolute(absolute) => absolute.min((content - viewport).max(0.0)),
+            Offset::Relative(percentage) => ((content - viewport) * percentage).max(0.0),
+        }
+    }
+
+    fn translation(self, viewport: f32, content: f32) -> f32 {
+        self.absolute(viewport, content)
+    }
+}
+
+/// The current [`Viewport`] of the [`Scrollable`].
+#[derive(Debug, Clone, Copy)]
+pub struct Viewport {
+    offset_y: Offset,
+    bounds: Rectangle,
+    content_bounds: Rectangle,
+}
+
+impl Viewport {
+    /// Returns the [`AbsoluteOffset`] of the current [`Viewport`].
+    pub fn absolute_offset(&self) -> AbsoluteOffset {
+        let y = self
+            .offset_y
+            .absolute(self.bounds.height, self.content_bounds.height);
+
+        AbsoluteOffset { x: 0.0, y }
+    }
+
+    /// Returns the [`RelativeOffset`] of the current [`Viewport`].
+    pub fn relative_offset(&self) -> RelativeOffset {
+        let AbsoluteOffset { x: _, y } = self.absolute_offset();
+
+        let y = y / (self.content_bounds.height - self.bounds.height);
+
+        RelativeOffset { x: 0.0, y }
+    }
+
+    /// Returns the bounds of the current [`Viewport`].
+    pub fn bounds(&self) -> Rectangle {
+        self.bounds
+    }
+
+    /// Returns the content bounds of the current [`Viewport`].
+    pub fn content_bounds(&self) -> Rectangle {
+        self.content_bounds
+    }
+}
+
+fn notify_scroll<Message>(
+    state: &mut State,
+    bounds: Rectangle,
+    content_bounds: Rectangle,
+    shell: &mut Shell<'_, Message>,
+) -> bool {
+    if notify_viewport(state, bounds, content_bounds, shell) {
+        state.last_scrolled = Some(Instant::now());
+
+        true
+    } else {
+        false
+    }
+}
+
+fn notify_viewport<Message>(
+    state: &mut State,
+    bounds: Rectangle,
+    content_bounds: Rectangle,
+    shell: &mut Shell<'_, Message>,
+) -> bool {
+    if content_bounds.width <= bounds.width && content_bounds.height <= bounds.height {
+        return false;
+    }
+
+    let viewport = Viewport {
+        offset_y: state.offset_y,
+        bounds,
+        content_bounds,
+    };
+
+    // Don't publish redundant viewports to shell
+    if let Some(last_notified) = state.last_notified {
+        let last_relative_offset = last_notified.relative_offset();
+        let current_relative_offset = viewport.relative_offset();
+
+        let last_absolute_offset = last_notified.absolute_offset();
+        let current_absolute_offset = viewport.absolute_offset();
+
+        let unchanged =
+            |a: f32, b: f32| (a - b).abs() <= f32::EPSILON || (a.is_nan() && b.is_nan());
+
+        if last_notified.bounds == bounds
+            && last_notified.content_bounds == content_bounds
+            && unchanged(last_relative_offset.x, current_relative_offset.x)
+            && unchanged(last_relative_offset.y, current_relative_offset.y)
+            && unchanged(last_absolute_offset.x, current_absolute_offset.x)
+            && unchanged(last_absolute_offset.y, current_absolute_offset.y)
+        {
+            return false;
+        }
+    }
+
+    state.last_notified = Some(viewport);
+    true
 }
 
 struct State {
@@ -187,6 +299,26 @@ struct State {
     task:             Task,
     visible_outdated: bool,
     is_new:           bool,
+
+    // scrolling stuff
+    offset_y: Offset,
+    keyboard_modifiers: keyboard::Modifiers,
+    last_scrolled: Option<Instant>,
+    last_notified: Option<Viewport>,
+}
+
+impl operation::Scrollable for State {
+    fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
+        State::snap_to(self, offset);
+    }
+
+    fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
+        State::scroll_to(self, offset);
+    }
+
+    fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
+        State::scroll_by(self, offset, bounds, content_bounds);
+    }
 }
 
 impl State {
@@ -300,6 +432,69 @@ impl State {
             self.last_limits = loose_limits;
         }
     }
+
+
+    // Scrolling stuff
+    fn scroll(&mut self, delta: Vector<f32>, bounds: Rectangle, content_bounds: Rectangle) {
+        if bounds.height < content_bounds.height {
+            self.offset_y = Offset::Absolute(
+                (self.offset_y.absolute(bounds.height, content_bounds.height) + delta.y)
+                    .clamp(0.0, content_bounds.height - bounds.height),
+            );
+
+            println!(":::::::::: scroll - State::scroll(), offset_y = {:?}", self.offset_y);
+        } else {
+            println!(":::::::::: scroll - State::scroll() didn't scroll, bounds = {:?}, \
+                content_bounds = {:?}", bounds, content_bounds);
+        }
+    }
+
+    fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
+        if let Some(y) = offset.y {
+            self.offset_y = Offset::Relative(y.clamp(0.0, 1.0));
+            println!(":::::::::: scroll - State::snap_to(), offset_y = {:?}", self.offset_y);
+        }
+    }
+
+    fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
+        if let Some(y) = offset.y {
+            self.offset_y = Offset::Absolute(y.max(0.0));
+            println!(":::::::::: scroll - State::scroll_to(), offset_y = {:?}", self.offset_y);
+        }
+    }
+
+    fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
+        self.scroll(Vector::new(offset.x, offset.y), bounds, content_bounds);
+    }
+
+    /// Returns the scrolling translation of the [`State`], given
+    /// the bounds of the [`Scrollable`] and its contents.
+    fn translation(
+        &self,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+    ) -> Vector {
+        Vector::new(
+            0.0,
+            self.offset_y
+                .translation(bounds.height, content_bounds.height)
+                .round()
+        )
+    }
+
+    fn compute_content_bounds(&self) -> Rectangle {
+        if self.visible_layouts.is_empty() {
+            Rectangle::default() // 0-size rect
+        } else {
+            let first_idx = self.visible_layouts.first().unwrap().0;
+            let last_idx = self.visible_layouts.last().unwrap().0;
+
+            let width = self.size.width;
+            let height = self.offset_after(last_idx) - self.offset_of(first_idx);
+
+            Rectangle { x: 0.0, y: 0.0, width, height }
+        }
+    }
 }
 
 impl<'a, T, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -321,6 +516,11 @@ where
             task:             Task::Idle,
             visible_outdated: false,
             is_new:           true,
+
+            offset_y: Offset::Absolute(0.0),
+            keyboard_modifiers: keyboard::Modifiers::default(),
+            last_scrolled: None,
+            last_notified: None
         })
     }
 
@@ -376,139 +576,261 @@ where
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
-        let offset = layout.position() - Point::ORIGIN;
 
-        for (element, (_index, layout, tree)) in
-            self.visible_elements.iter_mut().zip(&mut state.visible_layouts)
-        {
-            element.as_widget_mut().update(
-                tree,
-                event,
-                Layout::with_offset(offset, layout),
-                cursor,
-                renderer,
-                clipboard,
-                shell,
-                viewport,
-            )
+        let bounds = layout.bounds();
+        let cursor_over_scrollable = cursor.position_over(bounds);
+        let content_bounds = state.compute_content_bounds();
+
+        let last_offset_y = state.offset_y;
+
+        // 1. check if it's been long enough to stop scrolling or they moved the mouse or whatever
+        if let Some(last_scrolled) = state.last_scrolled {
+            let clear_transaction = match event {
+                Event::Mouse(
+                    mouse::Event::ButtonPressed(_)
+                    | mouse::Event::ButtonReleased(_)
+                    | mouse::Event::CursorLeft,
+                ) => true,
+                Event::Mouse(mouse::Event::CursorMoved { .. }) =>
+                     last_scrolled.elapsed() > Duration::from_millis(100),
+                _ => last_scrolled.elapsed() > Duration::from_millis(1500),
+            };
+
+            if clear_transaction {
+                println!(":::::::::: scroll - clear transaction");
+                state.last_scrolled = None;
+            }
         }
 
-        if let Event::Window(window::Event::RedrawRequested(_)) = event {
-            if state.task.is_computing() {
-                shell.invalidate_layout();
-                shell.request_redraw();
+        let offset = layout.position() - Point::ORIGIN;
+
+        if state.last_scrolled.is_none()
+            || !matches!(event, Event::Mouse(mouse::Event::WheelScrolled { .. }))
+        {
+            let translation = state.translation(bounds, content_bounds);
+
+            let cursor = match cursor_over_scrollable {
+                Some(cursor_position) => mouse::Cursor::Available(cursor_position + translation),
+                _                     => cursor.levitate() + translation,
+            };
+
+            let had_input_method = shell.input_method().is_enabled();
+
+            // println!(":::::::::: scroll - forwarding event");
+
+            for (element, (_index, layout, tree)) in
+                self.visible_elements.iter_mut().zip(&mut state.visible_layouts)
+            {
+                element.as_widget_mut().update(
+                    tree,
+                    event,
+                    Layout::with_offset(offset, layout),
+                    cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    &Rectangle {
+                        x: bounds.x + translation.x,
+                        y: bounds.y + translation.y,
+                        ..bounds
+                    },
+                )
             }
 
-            let view_top = viewport.y - offset.y;
-            let view_bottom = view_top + viewport.height;
-
-            // TODO: temporary
-            let temp_offsets = state.offsets.iter().collect::<Vec<_>>();
-
-            if temp_offsets.is_empty() {
-                return;
+            if !had_input_method
+                && let InputMethod::Enabled { cursor, .. } = shell.input_method_mut()
+            {
+                *cursor = *cursor - translation;
             }
+        }
 
-            let start_idx = match binary_search_with_index_by(&temp_offsets, |_i, (_, height)| {
-                    (*height).partial_cmp(&view_top).unwrap_or(Ordering::Equal)
-                }) {
-                    Ok(i)  => *temp_offsets[i].0,
-                    Err(i) => *temp_offsets[i.saturating_sub(1)].0,
+        // if they let go of the mouse/finger, return.
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                | Event::Touch(
+                    touch::Event::FingerLifted { .. } | touch::Event::FingerLost { .. }
+                )
+        ) {
+            println!(":::::::::: scroll - let go");
+            return;
+        }
+
+        // if the event was already captured, return.
+        if shell.is_event_captured() {
+            println!(":::::::::: scroll - event captured");
+            return;
+        }
+
+        match event {
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if cursor_over_scrollable.is_none() {
+                    println!(":::::::::: scroll - cursor not over scrollable");
+                    return;
                 }
-                .min(self.content.domain());
 
-            let end_idx = match binary_search_with_index_by(&temp_offsets, |_i, (_, height)| {
-                    (*height).partial_cmp(&view_bottom).unwrap_or(Ordering::Equal)
-                }) {
-                    Ok(i) | Err(i) => {
-                        if i == temp_offsets.len() {
-                            *temp_offsets[i.saturating_sub(1)].0
+                // if they used the mouse wheel over the viewport, SCROLL IT!
+
+                let delta = match *delta {
+                    mouse::ScrollDelta::Lines { x, y } => {
+                        let is_shift_pressed = state.keyboard_modifiers.shift();
+
+                        // macOS automatically inverts the axes when Shift is pressed
+                        let (x, y) = if cfg!(target_os = "macos") && is_shift_pressed {
+                            (y, x)
                         } else {
-                            *temp_offsets[i].0
+                            (x, y)
+                        };
+
+                        let movement = if !is_shift_pressed {
+                            Vector::new(x, y)
+                        } else {
+                            Vector::new(y, x)
+                        };
+
+                        // TODO: Configurable speed/friction (?)
+                        -movement * 60.0
+                    }
+                    mouse::ScrollDelta::Pixels { x, y } => -Vector::new(x, y),
+                };
+
+                println!(":::::::::: scroll - scrolling by {:?}", delta);
+                state.scroll(delta, bounds, content_bounds);
+
+                let has_scrolled = notify_scroll(state, bounds, content_bounds, shell);
+
+                if has_scrolled || state.last_scrolled.is_some() {
+                    shell.capture_event();
+                }
+            }
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                // check for keyboard modifiers (to undo shift-scroll axis-swapping on macos)
+                println!(":::::::::: scroll - capturing keyboard modifiers");
+                state.keyboard_modifiers = *modifiers;
+            }
+            Event::Window(window::Event::RedrawRequested(_)) => {
+                println!(":::::::::: scroll - redraw requested");
+                if state.task.is_computing() {
+                    shell.invalidate_layout();
+                    shell.request_redraw();
+                }
+
+                let view_top = viewport.y - offset.y;
+                let view_bottom = view_top + viewport.height;
+
+                // TODO: temporary
+                let temp_offsets = state.offsets.iter().collect::<Vec<_>>();
+
+                if temp_offsets.is_empty() {
+                    return;
+                }
+
+                let start_idx = match binary_search_with_index_by(&temp_offsets, |_i, (_, height)| {
+                        (*height).partial_cmp(&view_top).unwrap_or(Ordering::Equal)
+                    }) {
+                        Ok(i)  => *temp_offsets[i].0,
+                        Err(i) => *temp_offsets[i.saturating_sub(1)].0,
+                    }
+                    .min(self.content.domain());
+
+                let end_idx = match binary_search_with_index_by(&temp_offsets, |_i, (_, height)| {
+                        (*height).partial_cmp(&view_bottom).unwrap_or(Ordering::Equal)
+                    }) {
+                        Ok(i) | Err(i) => {
+                            if i == temp_offsets.len() {
+                                *temp_offsets[i.saturating_sub(1)].0
+                            } else {
+                                *temp_offsets[i].0
+                            }
+                        }
+                    }
+                    .min(self.content.domain());
+
+                if state.visible_outdated
+                    || state.visible_layouts.len() != self.visible_elements.len()
+                {
+                    self.visible_elements.clear();
+                    state.visible_outdated = false;
+                }
+
+                // If view was recreated, we repopulate the visible elements
+                // out of the internal visible layouts
+                if self.visible_elements.is_empty() {
+                    self.visible_elements = state
+                        .visible_layouts
+                        .iter()
+                        .map(|(idx, _, _)| self.new_element(*idx))
+                        .collect();
+                }
+
+                // Clear no longer visible elements
+                let top = state
+                    .visible_layouts
+                    .iter()
+                    .take_while(|(idx, _, _)| *idx < start_idx)
+                    .count();
+
+                let bottom = state
+                    .visible_layouts
+                    .iter()
+                    .rev()
+                    .take_while(|(idx, _, _)| *idx >= end_idx)
+                    .count();
+
+                self.visible_elements.splice(..top, []);
+                state.visible_layouts.splice(..top, []);
+
+                self.visible_elements
+                    .splice(self.visible_elements.len() - bottom.., []);
+                state.visible_layouts
+                    .splice(state.visible_layouts.len() - bottom.., []);
+
+                // Prepend new visible elements
+                if let Some(first_visible) = state.first_visible_index() {
+                    if start_idx < first_visible {
+                        for (i, (idx, item)) in self.content.items_at_and_after(start_idx).enumerate() {
+                            if idx >= first_visible {
+                                break;
+                            }
+
+                            let element = self.new_element_with(idx, item);
+                            let (element, tree, layout) = self.layout_element(&state.last_limits,
+                                renderer, state.offset_of(idx), element);
+                            state.visible_layouts.insert(i, (idx, layout, tree));
+                            self.visible_elements.insert(i, element);
                         }
                     }
                 }
-                .min(self.content.domain());
 
-            if state.visible_outdated
-                || state.visible_layouts.len() != self.visible_elements.len()
-            {
-                self.visible_elements.clear();
-                state.visible_outdated = false;
-            }
-
-            // If view was recreated, we repopulate the visible elements
-            // out of the internal visible layouts
-            if self.visible_elements.is_empty() {
-                self.visible_elements = state
+                // Append new visible elements
+                let last_visible = state
                     .visible_layouts
-                    .iter()
-                    .map(|(idx, _, _)| self.new_element(*idx))
-                    .collect();
-            }
+                    .last()
+                    .map(|(idx, _, _)| *idx + 1)
+                    .unwrap_or(start_idx);
 
-            // Clear no longer visible elements
-            let top = state
-                .visible_layouts
-                .iter()
-                .take_while(|(idx, _, _)| *idx < start_idx)
-                .count();
-
-            let bottom = state
-                .visible_layouts
-                .iter()
-                .rev()
-                .take_while(|(idx, _, _)| *idx >= end_idx)
-                .count();
-
-            self.visible_elements.splice(..top, []);
-            state.visible_layouts.splice(..top, []);
-
-            self.visible_elements
-                .splice(self.visible_elements.len() - bottom.., []);
-            state.visible_layouts
-                .splice(state.visible_layouts.len() - bottom.., []);
-
-            // Prepend new visible elements
-            if let Some(first_visible) = state.first_visible_index() {
-                if start_idx < first_visible {
-                    for (i, (idx, item)) in self.content.items_at_and_after(start_idx).enumerate() {
-                        if idx >= first_visible {
+                if last_visible < end_idx {
+                    for (idx, item) in self.content.items_at_and_after(last_visible) {
+                        if idx >= end_idx {
                             break;
                         }
 
                         let element = self.new_element_with(idx, item);
                         let (element, tree, layout) = self.layout_element(&state.last_limits,
                             renderer, state.offset_of(idx), element);
-                        state.visible_layouts.insert(i, (idx, layout, tree));
-                        self.visible_elements.insert(i, element);
+                        state.visible_layouts.push((idx, layout, tree));
+                        self.visible_elements.push(element);
                     }
                 }
             }
 
-            // Append new visible elements
-            let last_visible = state
-                .visible_layouts
-                .last()
-                .map(|(idx, _, _)| *idx + 1)
-                .unwrap_or(start_idx);
-
-            if last_visible < end_idx {
-                for (idx, item) in self.content.items_at_and_after(last_visible) {
-                    if idx >= end_idx {
-                        break;
-                    }
-
-                    let element = self.new_element_with(idx, item);
-                    let (element, tree, layout) = self.layout_element(&state.last_limits,
-                        renderer, state.offset_of(idx), element);
-                    state.visible_layouts.push((idx, layout, tree));
-                    self.visible_elements.push(element);
-                }
-            }
+            _ => {}
         }
 
-        // status
+        if last_offset_y != state.offset_y {
+            println!(":::::::::: scroll - offset changed, requesting redraw");
+            shell.request_redraw();
+        }
     }
 
     fn draw(
@@ -522,21 +844,47 @@ where
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<State>();
+
+        let bounds = layout.bounds();
+        let content_bounds = state.compute_content_bounds();
+
+        let Some(visible_bounds) = bounds.intersection(viewport) else {
+            return;
+        };
+
+        let translation = state.translation(bounds, content_bounds);
+
+        let cursor = match cursor.position_over(bounds) {
+            Some(cursor_position) => mouse::Cursor::Available(cursor_position + translation),
+            _                     => cursor.levitate() + translation,
+        };
+
         let offset = layout.position() - Point::ORIGIN;
 
-        for (element, (_item, layout, tree)) in
-            self.visible_elements.iter().zip(&state.visible_layouts)
-        {
-            element.as_widget().draw(
-                tree,
-                renderer,
-                theme,
-                style,
-                Layout::with_offset(offset, layout),
-                cursor,
-                viewport,
+        renderer.with_layer(visible_bounds, |renderer| {
+            renderer.with_translation(
+                Vector::new(-translation.x, -translation.y),
+                |renderer| {
+                    for (element, (_item, layout, tree)) in
+                        self.visible_elements.iter().zip(&state.visible_layouts)
+                    {
+                        element.as_widget().draw(
+                            tree,
+                            renderer,
+                            theme,
+                            style,
+                            Layout::with_offset(offset, layout),
+                            cursor,
+                            &Rectangle {
+                                x: visible_bounds.x + translation.x,
+                                y: visible_bounds.y + translation.y,
+                                ..visible_bounds
+                            },
+                        );
+                    }
+                },
             );
-        }
+        });
     }
 
     fn mouse_interaction(
@@ -574,6 +922,15 @@ where
         operation: &mut dyn widget::Operation,
     ) {
         let state = tree.state.downcast_mut::<State>();
+
+        // TODO: this needed? maybe to programmatically scroll? need an id for that
+        // let bounds = layout.bounds();
+        // let content_layout = layout.children().next().unwrap();
+        // let content_bounds = content_layout.bounds();
+        // let translation = state.translation(bounds, content_bounds);
+
+        // operation.scrollable(self.id.as_ref(), bounds, content_bounds, translation, state);
+
         let offset = layout.position() - Point::ORIGIN;
 
         for (element, (_item, layout, tree)) in
