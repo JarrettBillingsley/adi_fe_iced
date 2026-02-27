@@ -1,23 +1,24 @@
 
-1. automatic spawning/despawning on scrolling
-2. item_changed/removed/added can also cause elements to need to be spawned/despawned
-3. also when resized?? have to detect that based on uhhh bounds in draw()..
+- item_changed/removed/added can also cause elements to need to be spawned/despawned
+- also when resized?? have to detect that based on uhhh bounds in draw()..
 	- currently resizing it causes it to black out, wtf?
-4. State::size should really be named like `content_size` or `content_bounds` or something *cause that's what it is*
 
 ---
 
 before we scroll, we ask, "would scrolling by this much put us in the danger zone?" so:
 
 - when scrolling down:
-	- if bottom-most manifested element's bottom moves **above bottom,**
-		- append more items until bottom is >= bottom
-	- if top-most manifested element's bottom moves **above top,**
-		- remove items at start until top-most bottom is below top
+	- if bottom-most manifested element's bottom moves **above new_view_bottom,**
+		- append more items until bottom is >= new_view_bottom
+	- if top-most manifested element's bottom moves **above new_offset_y,**
+		- remove items at start until top-most bottom is below new_offset_y
 		- each removal also needs to adjust the scroll position!
-- when scrolling up, do reverse
-	- prepend items as needed (while adjusting scroll position for each one)
-	- remove items at end as needed
+- when scrolling up:
+	- if top-most element's top moves **below new_offset_y,**
+		- prepend more items until top is <= new_offset_y
+		- each prepend also needs to adjust the scroll position!
+	- if bottom-most element's top moves **below new_view_bottom,**
+		- remove items at end until bottom-most top is above new_view_bottom
 
 the State::scroll() method already handles the clamping of the scroll at the content bounds, so that should handle the top/bottom of the list.
 
