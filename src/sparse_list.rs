@@ -1,6 +1,10 @@
 #![allow(missing_docs)]
 #![allow(unused)]
-///! Taken from iced/list-widget-reloaded's list.rs, mashed up with stuff from scrollable.rs
+///! Horrifying amalgamation of iced/list-widget-reloaded's List, and iced's Scrollable.
+///! Scrollable list of items which are dynamically instantiated, whose indexes are ordered but
+///! potentially sparse. Also supports jumping to top/bottom/arbitrary item indexes, but doesn't
+///! really have a concept of a "scroll position" the way a real Scrollable does. Scrolling is
+///! instead kind of always relative to the current position.
 
 use iced_core::{
     self, Clipboard, Element, Layout, Length, Point, Rectangle, Shell,
@@ -18,11 +22,6 @@ use std::collections::VecDeque;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
-/// Creates a new [`SparseList`] with the provided [`Content`] and
-/// closure to view an item of the [`SparseList`].
-///
-/// [`SparseList`]: crate::SparseList
-/// [`Content`]: crate::sparse_list::Content
 pub fn sparse_list<'a, T, Message, Theme, Renderer: iced_core::Renderer>(
     content: &'a dyn IContent<'a, T>,
     view_item: impl Fn(usize, &'a T) -> Element<'a, Message, Theme, Renderer> + 'a,
@@ -60,8 +59,8 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
         (self.view_item)(idx, item)
     }
 
-    // passing the element in and returning it seems silly but BORROW CHECKER REASONS
-    // well, really, "lack of impl Borrow for &mut Element" reasons but same idea
+    // passing the element in and returning it seems silly but BORROW CHECKER REASONS (well,
+    // really, "lack of impl Borrow for &mut Element" reasons but same diff)
     fn layout_element(&self, limits: &layout::Limits, renderer: &Renderer, y: f32,
     mut element: Element<'a, Message, Theme, Renderer>)
     -> (Element<'a, Message, Theme, Renderer>, Tree, layout::Node) {
@@ -109,70 +108,181 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
         state.visible_layouts.clear();
     }
 
-    fn update_task(&mut self, state: &mut State, renderer: &Renderer) {
-        match &mut state.task {
-            Task::Idle => {}
-            Task::Computing {
-                current,
-                size,
-                widths,
-                offsets,
-            } => {
-                const MAX_BATCH_SIZE: usize = 50;
+    fn refresh(&mut self, state: &mut State, renderer: &Renderer, bounds: Rectangle) -> f32 {
+        // ------------------------------------------------------------
+        // setup
 
-                let batch = self.content.items_at_and_after(*current).take(MAX_BATCH_SIZE);
+        println!("refresh: bounds = {:?}", bounds);
 
-                let mut max_width = size.width;
-                let mut accumulated_height = offsets.last_key_value()
-                    .map(|(_, v)| *v).unwrap_or(0.0);
-                let mut last_idx = *current;
+        // wipe out old state
+        self.visible_elements.clear();
+        state.visible_layouts.clear();
+        state.offsets.clear();
+        state.widths.clear();
 
-                for (idx, item) in batch {
-                    let size = self.layout_element(&state.last_limits, renderer, accumulated_height,
-                        self.new_element_with(idx, &item)).2.size();
+        // ------------------------------------------------------------
+        // initial element (the one they asked to jump to)
 
-                    max_width = max_width.max(size.width);
+        // grab the new position and offset. offset_y is where (measured from the top of the view)
+        // the new element should be positioned.
+        let NewPosition { idx: initial_idx, offset_y } =
+            std::mem::take(&mut state.new_position).expect("hey, YOU called refresh");
 
-                    offsets.insert(idx, accumulated_height);
-                    widths.insert(idx, size.width);
+        // we need to first create the element from the item at initial_idx. its Y position doesn't
+        // matter because we'll be computing it later from the heights of the items above it.
+        let initial_element = self.new_element(initial_idx);
+        let (initial_element, initial_tree, initial_layout) =
+            self.layout_element(&state.last_limits, renderer, 0.0, initial_element);
 
-                    accumulated_height += size.height;
-                    last_idx = idx;
-                }
+        let mut visible_layouts = vec![(initial_idx, initial_layout, initial_tree)];
+        let mut visible_elements = vec![initial_element];
 
-                *size = Size::new(max_width, accumulated_height);
+        // ------------------------------------------------------------
+        // if needed, we need to create elements before it until either those items go offscreen or
+        // we run out, whichever comes first.
 
-                match self.content.items_after(last_idx).next() {
-                    Some((rest_idx, _)) if rest_idx < self.content.domain() => {
-                        *current = rest_idx;
-                    }
+        // this is how many pixels above the initial element we need to fill in with elements.
+        let mut pixels_remaining = offset_y;
 
-                    _ => {
-                        offsets.insert(self.content.domain(), accumulated_height);
-                        state.offsets = std::mem::take(offsets);
-                        state.widths = std::mem::take(widths);
-                        state.size = std::mem::take(size);
-                        state.task = Task::Idle;
-                    }
-                }
+        for (idx, item) in self.content.items_before(initial_idx) {
+            if pixels_remaining <= 0.0 {
+                // once we've filled all the pixels above this item, bail.
+                break;
             }
+
+            // first create and lay it out. again its Y position doesn't matter since we'll be
+            // computing it in the next loop.
+            let element = self.new_element_with(idx, item);
+            let (element, tree, mut layout) = self.layout_element(&state.last_limits,
+                renderer, 0.0, element);
+
+            // decrement the number of pixels remaining based on its height
+            pixels_remaining -= layout.size().height;
+
+            // then push the things
+            visible_layouts.push((idx, layout, tree));
+            visible_elements.push(element);
         }
-    }
-}
 
-enum Task {
-    Idle,
-    Computing {
-        current: usize,
-        offsets: BTreeMap<usize, f32>,
-        widths:  BTreeMap<usize, f32>,
-        size:    Size,
-    },
-}
+        // since we pushed them, they're in reverse order.
+        visible_layouts.reverse();
+        visible_elements.reverse();
 
-impl Task {
-    fn is_computing(&self) -> bool {
-        matches!(self, Task::Computing { .. })
+        // now recompute their Y positions so that they start at Y = 0.
+        let mut current_y = 0.0;
+
+        for (_, layout, _) in visible_layouts.iter_mut() {
+            layout.move_to_mut((0.0, current_y));
+            current_y += layout.size().height;
+        }
+
+        // ------------------------------------------------------------
+        // THEN... we might need to create elements *after* the initial element.
+
+        // bottom of the view.
+        let bottom_y = bounds.y + bounds.height;
+
+        let initial_bounds = visible_layouts.last().unwrap().1.bounds();
+        let mut current_y = initial_bounds.y + initial_bounds.height;
+
+        // this may be an over-estimation in the case that there were not enough items to use up
+        // the pixels_remaining in the first loop - but meh whatever
+        let mut pixels_remaining = bounds.height - (offset_y + initial_bounds.height);
+
+        for (idx, item) in self.content.items_after(initial_idx) {
+            if pixels_remaining <= 0.0 {
+                // once we've filled all the pixels below the initial item, bail.
+                break;
+            }
+
+            // create and lay it out (and this time we know the right Y coordinate)
+            let element = self.new_element_with(idx, item);
+            let (element, tree, mut layout) = self.layout_element(&state.last_limits,
+                renderer, current_y, element);
+
+            // move current_y down
+            current_y += layout.size().height;
+            pixels_remaining -= layout.size().height;
+
+            // and push the things
+            visible_layouts.push((idx, layout, tree));
+            visible_elements.push(element);
+        }
+
+        // note that we may have run out of items to fill up the view, but that's okay. in that case
+        // it just won't be scrollable.
+
+        // compute the offsets, widths, and total content size from the elements' layouts.
+        let mut current_y: f32 = 0.0;
+        let mut offsets = BTreeMap::new();
+        let mut widths = BTreeMap::new();
+        let mut max_width: f32 = 0.0;
+
+        for (idx, layout, _) in visible_layouts.iter() {
+            let bounds = layout.bounds();
+            assert!(current_y == bounds.y); // should be true...
+            offsets.insert(*idx, current_y);
+            widths.insert(*idx, bounds.width);
+            max_width = max_width.max(bounds.width);
+            current_y += bounds.height;
+        }
+
+        // offsets has one extra item past the last element.
+        offsets.insert(self.content.domain(), current_y);
+
+        // done with everything, put it all in the state
+        state.offsets = offsets;
+        state.widths = widths;
+        state.visible_layouts = visible_layouts;
+        self.visible_elements = visible_elements;
+        state.size = Size::new(max_width, current_y);
+
+        // for scrolling, reset the state's scrolling offset and return the desired delta.
+        state.offset_y = Offset::Absolute(0.0);
+        println!("AAAAAAAAAAAAAAAAAAAAAA: {}, {}", state.offset_of(initial_idx), offset_y);
+
+        state.offset_of(initial_idx) - offset_y
+
+
+
+
+
+
+        // let batch = self.content.items_at_and_after(*current).take(MAX_BATCH_SIZE);
+
+        // let mut max_width = size.width;
+        // let mut accumulated_height = offsets.last_key_value()
+        //     .map(|(_, v)| *v).unwrap_or(0.0);
+        // let mut last_idx = *current;
+
+        // for (idx, item) in batch {
+        //     let size = self.layout_element(&state.last_limits, renderer, accumulated_height,
+        //         self.new_element_with(idx, &item)).2.size();
+
+        //     max_width = max_width.max(size.width);
+
+        //     offsets.insert(idx, accumulated_height);
+        //     widths.insert(idx, size.width);
+
+        //     accumulated_height += size.height;
+        //     last_idx = idx;
+        // }
+
+        // *size = Size::new(max_width, accumulated_height);
+
+        // match self.content.items_after(last_idx).next() {
+        //     Some((rest_idx, _)) if rest_idx < self.content.domain() => {
+        //         *current = rest_idx;
+        //     }
+
+        //     _ => {
+        //         offsets.insert(self.content.domain(), accumulated_height);
+        //         state.offsets = std::mem::take(offsets);
+        //         state.widths = std::mem::take(widths);
+        //         state.size = std::mem::take(size);
+        //         state.task = Task::Idle;
+        //     }
+        // }
     }
 }
 
@@ -241,7 +351,6 @@ fn notify_scroll<Message>(
 ) -> bool {
     if notify_viewport(state, bounds, content_bounds, shell) {
         state.last_scrolled = Some(Instant::now());
-
         true
     } else {
         false
@@ -290,15 +399,20 @@ fn notify_viewport<Message>(
     true
 }
 
+#[derive(Clone, Copy)]
+struct NewPosition {
+    idx:      usize,
+    offset_y: f32,
+}
+
 struct State {
     last_limits:      layout::Limits,
     visible_layouts:  Vec<(usize, layout::Node, Tree)>,
     size:             Size,
     offsets:          BTreeMap<usize, f32>,
     widths:           BTreeMap<usize, f32>,
-    task:             Task,
     visible_outdated: bool,
-    is_new:           bool,
+    new_position:     Option<NewPosition>,
 
     // scrolling stuff
     offset_y: Offset,
@@ -322,21 +436,8 @@ impl operation::Scrollable for State {
 }
 
 impl State {
-    fn recompute(&mut self) {
-        self.task = Task::Computing {
-            current:     0,
-            offsets:     BTreeMap::new(),
-            widths:      BTreeMap::new(),
-            size:        Size::ZERO,
-        };
-        self.visible_layouts.clear();
-        self.is_new = false;
-    }
-
-    fn recompute_if_new(&mut self) {
-        if self.is_new {
-            self.recompute();
-        }
+    fn needs_refresh(&self) -> bool {
+        self.new_position.is_some()
     }
 
     fn offset_of(&self, idx: usize) -> f32 {
@@ -433,7 +534,6 @@ impl State {
         }
     }
 
-
     // Scrolling stuff
     fn scroll(&mut self, delta: Vector<f32>, bounds: Rectangle, content_bounds: Rectangle) {
         if bounds.height < content_bounds.height {
@@ -483,6 +583,7 @@ impl State {
     }
 
     fn compute_content_bounds(&self) -> Rectangle {
+        // TODO: isn't this just... self.size? isn't that literally how it's computed?
         if self.visible_layouts.is_empty() {
             Rectangle::default() // 0-size rect
         } else {
@@ -507,15 +608,18 @@ where
     }
 
     fn state(&self) -> tree::State {
+        let new_position =
+            self.content.items_after(self.content.first().unwrap())
+            .nth(9).map(|(idx, _)| NewPosition { idx, offset_y: 10.0 });
+
         tree::State::new(State {
             last_limits:      layout::Limits::NONE,
             visible_layouts:  Vec::new(),
             size:             Size::ZERO,
             offsets:          BTreeMap::new(),
             widths:           BTreeMap::new(),
-            task:             Task::Idle,
             visible_outdated: false,
-            is_new:           true,
+            new_position,
 
             offset_y: Offset::Absolute(0.0),
             keyboard_modifiers: keyboard::Modifiers::default(),
@@ -536,32 +640,19 @@ where
         let state = tree.state.downcast_mut::<State>();
         state.update_limits(limits.loose());
 
-        let mut changes = self.content.changes_mut();
+        if !state.needs_refresh() {
+            let mut changes = self.content.changes_mut();
 
-        match state.task {
-            Task::Idle => {
-                while let Some(change) = changes.pop_front() {
-                    match change {
-                        Change::Changed { idx } => self.item_changed(state, renderer, idx),
-                        Change::Removed { idx } => self.item_removed(state, idx),
-                        Change::Added   { idx } => self.item_added  (state, renderer, idx),
-                    }
-                }
-            }
-            Task::Computing { .. } => {
-                if !changes.is_empty() {
-                    // If changes happen during layout computation,
-                    // we simply restart the computation
-                    changes.clear();
-                    state.recompute();
+            while let Some(change) = changes.pop_front() {
+                match change {
+                    Change::Changed { idx } => self.item_changed(state, renderer, idx),
+                    Change::Removed { idx } => self.item_removed(state, idx),
+                    Change::Added   { idx } => self.item_added  (state, renderer, idx),
                 }
             }
         }
 
-        // Recompute if new
-        state.recompute_if_new();
-        self.update_task(state, renderer);
-        layout::Node::new(limits.resolve(Length::Shrink, Length::Shrink, state.size))
+        layout::Node::new(limits.resolve(Length::Fill, Length::Fill, state.size))
     }
 
     fn update(
@@ -579,7 +670,7 @@ where
 
         let bounds = layout.bounds();
         let cursor_over_scrollable = cursor.position_over(bounds);
-        let content_bounds = state.compute_content_bounds();
+        let mut content_bounds = state.compute_content_bounds();
 
         let last_offset_y = state.offset_y;
 
@@ -662,6 +753,19 @@ where
             return;
         }
 
+        if state.needs_refresh() {
+            let delta = self.refresh(state, renderer, bounds);
+            content_bounds = state.compute_content_bounds();
+            println!(":::::::::: scroll - refreshed! scrolling by {:?}", delta);
+            state.scroll(Vector::new(0.0, delta), bounds, content_bounds);
+
+            let has_scrolled = notify_scroll(state, bounds, content_bounds, shell);
+
+            if has_scrolled || state.last_scrolled.is_some() {
+                shell.capture_event();
+            }
+        }
+
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 if cursor_over_scrollable.is_none() {
@@ -670,7 +774,6 @@ where
                 }
 
                 // if they used the mouse wheel over the viewport, SCROLL IT!
-
                 let delta = match *delta {
                     mouse::ScrollDelta::Lines { x, y } => {
                         let is_shift_pressed = state.keyboard_modifiers.shift();
@@ -710,11 +813,8 @@ where
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
                 println!(":::::::::: scroll - redraw requested");
-                if state.task.is_computing() {
-                    shell.invalidate_layout();
-                    shell.request_redraw();
-                }
 
+                /*
                 let view_top = viewport.y - offset.y;
                 let view_bottom = view_top + viewport.height;
 
@@ -822,6 +922,7 @@ where
                         self.visible_elements.push(element);
                     }
                 }
+                */
             }
 
             _ => {}
