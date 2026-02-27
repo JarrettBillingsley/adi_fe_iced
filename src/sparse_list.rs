@@ -581,21 +581,6 @@ impl State {
                 .round()
         )
     }
-
-    fn compute_content_bounds(&self) -> Rectangle {
-        // TODO: isn't this just... self.size? isn't that literally how it's computed?
-        if self.visible_layouts.is_empty() {
-            Rectangle::default() // 0-size rect
-        } else {
-            let first_idx = self.visible_layouts.first().unwrap().0;
-            let last_idx = self.visible_layouts.last().unwrap().0;
-
-            let width = self.size.width;
-            let height = self.offset_after(last_idx) - self.offset_of(first_idx);
-
-            Rectangle { x: 0.0, y: 0.0, width, height }
-        }
-    }
 }
 
 impl<'a, T, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -670,7 +655,7 @@ where
 
         let bounds = layout.bounds();
         let cursor_over_scrollable = cursor.position_over(bounds);
-        let mut content_bounds = state.compute_content_bounds();
+        let mut content_bounds = Rectangle::with_size(state.size);
 
         let last_offset_y = state.offset_y;
 
@@ -755,7 +740,7 @@ where
 
         if state.needs_refresh() {
             let delta = self.refresh(state, renderer, bounds);
-            content_bounds = state.compute_content_bounds();
+            content_bounds = Rectangle::with_size(state.size);
             println!(":::::::::: scroll - refreshed! scrolling by {:?}", delta);
             state.scroll(Vector::new(0.0, delta), bounds, content_bounds);
 
@@ -947,7 +932,7 @@ where
         let state = tree.state.downcast_ref::<State>();
 
         let bounds = layout.bounds();
-        let content_bounds = state.compute_content_bounds();
+        let content_bounds = Rectangle::with_size(state.size);
 
         let Some(visible_bounds) = bounds.intersection(viewport) else {
             return;
