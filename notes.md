@@ -1,9 +1,10 @@
 
 - item_changed/removed/added can also cause elements to need to be spawned/despawned
-- also when resized?? have to detect that based on uhhh bounds in draw()..
-	- currently resizing it causes it to black out, wtf?
 - programmatic scrolling - is that what the operation thing is for?
 - ditch Offset::Relative if not needed
+
+- JANK:
+	- short view, scroll to bottom, expand height -> items stay at top of view, until you scroll again. at least it doesn't crash
 
 ---
 

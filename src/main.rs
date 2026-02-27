@@ -131,7 +131,7 @@ impl TextBB {
 // Dummy code data
 // ------------------------------------------------------------------------------------------------
 
-const NUM_CODE_SPANS: usize = 50;
+const NUM_CODE_SPANS: usize = 500;
 
 const MNEMONICS: &[&'static str] = &[
 	"lda", "sta", "bpl", "jsr", "rts", "dex", "pha",
@@ -395,23 +395,23 @@ impl CodePane {
 				use CodeViewChangeKind::*;
 
 				container(column![
-					row![
-						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
-						iced::widget::space::Space::new().width(10),
-						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
-						iced::widget::space::Space::new().width(10),
-						button("modify").on_press(Message::CodeViewChange { ea, kind: Modify }),
-					],
+					// row![
+					// 	button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
+					// 	iced::widget::space::Space::new().width(10),
+					// 	button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
+					// 	iced::widget::space::Space::new().width(10),
+					// 	button("modify").on_press(Message::CodeViewChange { ea, kind: Modify }),
+					// ],
 					Rich::with_spans(bb.render())
 						.on_link_click(CodeLink::into_message)
 						.font(CONSOLAS_FONT.bold()),
-					row![
-						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
-						iced::widget::space::Space::new().width(10),
-						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
-						iced::widget::space::Space::new().width(10),
-						button("modify").on_press(Message::CodeViewChange { ea, kind: Modify }),
-					],
+					// row![
+					// 	button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
+					// 	iced::widget::space::Space::new().width(10),
+					// 	button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
+					// 	iced::widget::space::Space::new().width(10),
+					// 	button("modify").on_press(Message::CodeViewChange { ea, kind: Modify }),
+					// ],
 				])
 				.width(Length::Fill)
 				.style(move |_theme| {
