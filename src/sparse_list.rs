@@ -214,6 +214,18 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn refresh(&mut self, state: &mut State, renderer: &Renderer, bounds: Rectangle) -> Vector {
+		// there are four possible cases:
+		//
+		// - there are enough elements above and below to fill up the whole view
+		// - there are enough elements above, but *not* enough below (towards end of list)
+		//     - in this case, the desired offset_y is not achievable - must move it **down**
+		// - there are enough elements below, but *not* enough above (towards beginning of list)
+		//     - in this case, the desired offset_y is not achievable - must move it **up**
+		// - there are not enough elements above or below (short list)
+		//     - in this case, the desired offset_y is not achievable - **it's set to 0**
+		//
+		// ofc we have to do this sequentially so it's a little weird
+
 		// ------------------------------------------------------------
 		// setup
 
@@ -227,7 +239,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 		// grab the new position and offset. offset_y is where (measured from the top of the view)
 		// the new element should be positioned.
-		let NewPosition { idx: initial_idx, offset_y } =
+		let NewPosition { idx: initial_idx, mut offset_y } =
 			std::mem::take(&mut state.new_position).expect("hey, YOU called refresh");
 
 		// TODO: is there any requirement on offset_y? I could see it being useful to e.g. position
@@ -242,28 +254,68 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		self.add_element(state, renderer, initial_idx,
 			&self.content.get(initial_idx).unwrap(), 0.0, |_|{});
 
+		// ------------------------------------------------------------
 		// if needed, we need to create elements before it...
-		self.add_elements_before(state, renderer, initial_idx, offset_y);
+		let top_pixels_left = offset_y;
+		let top_pixels_left = self.add_elements_before(
+			state, renderer, initial_idx, top_pixels_left);
 
+		if top_pixels_left > 0.0 {
+			// ran out of elements on top; that means offset_y is not achievable.
+			// have to slide it up.
+			println!(">>>> ran out of elements on top, sliding offset_y up");
+			offset_y -= top_pixels_left;
+			assert_eq!(state.y_of(initial_idx), offset_y);
+		}
+
+		// ------------------------------------------------------------
 		// then we might need to create elements *after* it...
-		let initial_bounds = state.visible_layouts.get(&initial_idx).unwrap().0.bounds();
+		let initial_bounds = state.bounds_of(initial_idx);
 
-		// this may be an over-estimation in the case that there were not enough items to use up
-		// the pixels_remaining in the first loop - but meh whatever, it's fine, any excess element
-		// below the bottom of the view will get culled in the next frame
-		let pixels_remaining = bounds.height - (offset_y + initial_bounds.height);
-		self.add_elements_after(state, renderer, initial_idx, rect_bottom(&initial_bounds),
-			pixels_remaining);
-
-
-		// TODO: may need to update scroll position if add_elements_after returned > 0?
+		let bottom_pixels_left = bounds.height - (offset_y + initial_bounds.height);
+		let bottom_pixels_left = self.add_elements_after(
+				state, renderer, initial_idx, rect_bottom(&initial_bounds), bottom_pixels_left);
 
 		// note that we may have run out of items to fill up the view, but that's okay. in that case
 		// it just won't be scrollable.
 
+		if bottom_pixels_left > 0.0 {
+			// ran out of elements at the bottom; that means offset_y is not achievable.
+			println!(">>>> ran out of elements on bottom");
+
+			if state.first_index().unwrap() == self.content.first().unwrap() {
+				println!(">>>> first visible item is first item, forcing scroll to zero");
+				// in this case, we're just out of elements!
+				// the desired scroll offset is forced to 0.
+				state.offset_y = Offset::Absolute(0.0);
+				assert_eq!(state.y_of(state.first_index().unwrap()), 0.0);
+				return Vector::ZERO;
+			} else {
+				println!(">>>> sliding offset_y down and adding more before");
+				// have to slide it down.
+				offset_y += bottom_pixels_left;
+
+				// buuuuuut since we slid down... it may be the case that we need to do another
+				// round of adding elements before!!! and THAT can run out too... sheesh
+				let top_pixels_left = offset_y;
+				let top_pixels_left = self.add_elements_before(
+					state, renderer, state.first_index().unwrap(), top_pixels_left);
+
+				if top_pixels_left > 0.0 {
+					println!(">>>> ran out of items before too!! forcing scroll to zero");
+					state.offset_y = Offset::Absolute(0.0);
+					assert_eq!(state.y_of(state.first_index().unwrap()), 0.0);
+					return Vector::ZERO;
+				}
+			}
+		}
+
+		println!(">>>> ok we're good");
+
 		// for scrolling, reset the state's scrolling offset and return the desired delta.
 		state.offset_y = Offset::Absolute(0.0);
-		Vector::new(0.0, initial_bounds.y - offset_y)
+		assert_eq!(state.y_of(state.first_index().unwrap()), 0.0);
+		Vector::new(0.0, state.y_of(initial_idx) - offset_y)
 	}
 
 	/// about to scroll by `delta`; check if we need to manifest new items in the direction of
@@ -419,8 +471,16 @@ impl State {
 		self.new_position.is_some()
 	}
 
+	fn bounds_of(&self, idx: usize) -> Rectangle {
+		self.visible_layouts.get(&idx).unwrap().0.bounds()
+	}
+
+	fn y_of(&self, idx: usize) -> f32 {
+		self.bounds_of(idx).y
+	}
+
 	fn height_of(&self, idx: usize) -> f32 {
-		self.visible_layouts.get(&idx).unwrap().0.size().height
+		self.bounds_of(idx).height
 	}
 
 	fn first_index(&self) -> Option<usize> {
@@ -533,6 +593,9 @@ where
 
 	fn state(&self) -> tree::State {
 		let new_position =
+			// self.content.last().map(|idx| NewPosition { idx, offset_y: 200.0 });
+			// TODO: temporary
+			// self.content.last().map(|idx| NewPosition { idx, offset_y: 20.0 });
 			self.content.items_after(self.content.first().unwrap())
 			.nth(9).map(|(idx, _)| NewPosition { idx, offset_y: 10.0 });
 

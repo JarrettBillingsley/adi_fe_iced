@@ -2,6 +2,8 @@
 - item_changed/removed/added can also cause elements to need to be spawned/despawned
 - also when resized?? have to detect that based on uhhh bounds in draw()..
 	- currently resizing it causes it to black out, wtf?
+- programmatic scrolling - is that what the operation thing is for?
+- ditch Offset::Relative if not needed
 
 ---
 
@@ -55,3 +57,25 @@ if there aren't enough items *after* E to put E at the desired bounds-relative Y
 state.offset_y = clamp(E.y - offset_y, 0.0, content.height - bounds.height)
 
 which is the exact formula that State::scroll uses! how about that
+
+---
+
+on refresh(), we've got four possible cases:
+
+- there are enough elements above and below to fill up the whole view
+- there are enough elements above, but *not* enough below (towards end of list)
+	- in this case, the desired offset_y is not achievable - must move it **down**
+- there are enough elements below, but *not* enough above (towards beginning of list)
+	- in this case, the desired offset_y is not achievable - must move it **up**
+- there are not enough elements above or below (short list)
+	- in this case, the desired offset_y is not achievable - **it's set to 0**
+	
+1. items before, if ran out,
+	- slide offset up
+2. items after. if ran out,
+	- if first visible item is content.first(), 
+		- we're done - set offset to 0 and return
+	- otherwise,
+		- slide offset down
+		- items before, if ran out,
+			- set offset to 0 and return
