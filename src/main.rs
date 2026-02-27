@@ -318,7 +318,7 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
 		let mut iter = self.spans.range(..= idx);
 		iter.next_back();
-		Box::new(iter.map(|(idx, span)| (*idx, span)))
+		Box::new(iter.rev().map(|(idx, span)| (*idx, span)))
 	}
 
 	fn items_after(&'a self, idx: usize)
@@ -330,7 +330,7 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 	fn items_at_and_before(&'a self, idx: usize)
 	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
 		let iter = self.spans.range(..= idx);
-		Box::new(iter.map(|(idx, span)| (*idx, span)))
+		Box::new(iter.rev().map(|(idx, span)| (*idx, span)))
 	}
 
 	fn items_at_and_after(&'a self, idx: usize)
