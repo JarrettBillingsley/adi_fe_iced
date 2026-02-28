@@ -4,10 +4,10 @@ use std::ops::{ Bound };
 use std::cell::{ RefCell };
 
 use iced::widget::text::{ Span };
-use iced::{ Element, Font, color, Length, Border, Padding };
+use iced::{ Element, Font, color, Length, Border, Padding, Task };
 use iced::font::{ Weight };
 use iced::widget::{ pane_grid, text, column, row, span, container, scrollable, text::Rich, button,
-	space };
+	operation::{ self, AbsoluteOffset, RelativeOffset }, space };
 
 use better_panic::{ Settings as PanicSettings, Verbosity as PanicVerbosity };
 
@@ -68,6 +68,9 @@ enum Message {
 	PaneDragged(pane_grid::DragEvent),
 	PaneResized(pane_grid::ResizeEvent),
 	OperandClicked { ea: usize, opn: usize },
+	JumpTo { ea: usize },
+	JumpToTop,
+	JumpToBottom,
 
 	CodeViewChange { ea: usize, kind: CodeViewChangeKind },
 	AddItem,
@@ -175,7 +178,7 @@ fn dummy_code_data() -> &'static [TextBB] {
 // ------------------------------------------------------------------------------------------------
 
 struct NamesPane {
-	names: Vec<String>,
+	names: Vec<(usize, String)>,
 }
 
 impl NamesPane {
@@ -184,16 +187,19 @@ impl NamesPane {
 		let mut names = Vec::with_capacity(bbs.len());
 
 		for bb in bbs.iter() {
-			names.push(bb.label());
+			names.push((bb.ea, bb.label()));
 		}
 
 		Self { names }
 	}
 
 	fn view(&self) -> (Element<'_, Message>, String) {
-		let ui = scrollable(column(self.names.iter().map(|name| {
-			text(name).font(CONSOLAS_FONT.bold()).into()
-		})).width(Length::Fill).padding(10));
+		let ui = scrollable(column(self.names.iter().map(|(ea, name)| {
+			button(text(name).font(CONSOLAS_FONT.bold()))
+				.style(button::text)
+				.on_press(Message::JumpTo { ea: *ea })
+				.into()
+		})).width(Length::Fill).padding(Padding::from([0, 10])));
 
 		(ui.into(), "Names".into())
 	}
@@ -364,9 +370,9 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 		self.spans.keys().copied().nth(0)
 	}
 
-	// fn last(&self) -> Option<usize> {
-	// 	self.spans.keys().copied().nth_back(0)
-	// }
+	fn last(&self) -> Option<usize> {
+		self.spans.keys().copied().nth_back(0)
+	}
 
 	fn get(&self, idx: usize) -> Option<&AdiSpan> {
 		self.spans.get(&idx)
@@ -395,6 +401,8 @@ struct CodePane {
 }
 
 impl CodePane {
+	const LIST_ID: &str = "panes.code.list";
+
 	fn new() -> Self {
 		Self {
 			seg: DummySegment::new(),
@@ -402,7 +410,7 @@ impl CodePane {
 	}
 
 	fn view(&self) -> (Element<'_, Message>, String) {
-		let ui = container(sparse_list(
+		let list = sparse_list(
 			&self.seg,
 			|ea, span: &AdiSpan| {
 				// println!("manifesting bb @ ea {:04X}", ea);
@@ -414,25 +422,33 @@ impl CodePane {
 
 				container(column![
 					row![
-						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
-						iced::widget::space::Space::new().width(10),
-						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
-						iced::widget::space::Space::new().width(10),
-						button("expand").on_press(Message::CodeViewChange { ea, kind: Expand }),
-						iced::widget::space::Space::new().width(10),
-						button("contract").on_press(Message::CodeViewChange { ea, kind: Contract }),
+						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split })
+							.padding(0).style(button::danger),
+						space().width(10),
+						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete })
+							.padding(0).style(button::danger),
+						space().width(10),
+						button("expand").on_press(Message::CodeViewChange { ea, kind: Expand })
+							.padding(0).style(button::danger),
+						space().width(10),
+						button("contract").on_press(Message::CodeViewChange { ea, kind: Contract })
+							.padding(0).style(button::danger),
 					],
 					Rich::with_spans(bb.render())
 						.on_link_click(CodeLink::into_message)
 						.font(CONSOLAS_FONT.bold()),
 					row![
-						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
-						iced::widget::space::Space::new().width(10),
-						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
-						iced::widget::space::Space::new().width(10),
-						button("expand").on_press(Message::CodeViewChange { ea, kind: Expand }),
-						iced::widget::space::Space::new().width(10),
-						button("contract").on_press(Message::CodeViewChange { ea, kind: Contract }),
+						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split })
+							.padding(0).style(button::danger),
+						space().width(10),
+						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete })
+							.padding(0).style(button::danger),
+						space().width(10),
+						button("expand").on_press(Message::CodeViewChange { ea, kind: Expand })
+							.padding(0).style(button::danger),
+						space().width(10),
+						button("contract").on_press(Message::CodeViewChange { ea, kind: Contract })
+							.padding(0).style(button::danger),
 					],
 				])
 				.width(Length::Fill)
@@ -441,8 +457,9 @@ impl CodePane {
 						Border::default().color(color!(0xFFFFFF)).width(0.3))
 				})
 				.into()
-			})
-		)
+			}).id(Self::LIST_ID);
+
+		let ui = container(list)
 		.width(Length::Fill)
 		.height(Length::Fill)
 		.padding(Padding::from([0, 10]))
@@ -537,7 +554,7 @@ impl AdiFE {
 		self.panes.get_mut(self.code_pane).unwrap().as_code_mut()
 	}
 
-	fn update(&mut self, message: Message) {
+	fn update(&mut self, message: Message) -> Task<Message> {
 		match message {
 			Message::PaneDragged(de) => {
 				println!("dragged {:?}", de);
@@ -548,6 +565,28 @@ impl AdiFE {
 			Message::OperandClicked { ea, opn } => {
 				println!("clicked operand {} of instruction at {:04X}", opn, ea);
 			}
+			Message::JumpTo { ea } => {
+				println!("jump to ea {:04X}", ea);
+				// self.code_pane_mut().jump_to(ea);
+				return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
+					y: Some(f32::from_bits(ea as u32)),  // ea
+					x: Some(80.0),       // pixel offset from top
+				});
+			}
+			Message::JumpToTop =>  {
+				println!("jump to top");
+				return operation::snap_to(CodePane::LIST_ID, RelativeOffset {
+					x: None,
+					y: Some(0.0),
+				});
+			}
+			Message::JumpToBottom =>  {
+				println!("jump to bottom");
+				return operation::snap_to(CodePane::LIST_ID, RelativeOffset {
+					x: None,
+					y: Some(1.0),
+				});
+			}
 
 			Message::CodeViewChange { ea, kind } => {
 				self.code_pane_mut().change(ea, kind);
@@ -556,6 +595,8 @@ impl AdiFE {
 				self.code_pane_mut().add();
 			}
 		}
+
+		Task::none()
 	}
 
 	fn view(&self) -> Element<'_, Message> {
@@ -573,8 +614,13 @@ impl AdiFE {
 			.on_resize(10, Message::PaneResized)
 			.min_size(200),
 
-			space().height(50),
-			button("add").on_press(Message::AddItem)
+			row![
+				button("add").on_press(Message::AddItem),
+				space().width(10),
+				button("top").on_press(Message::JumpToTop),
+				space().width(10),
+				button("bottom").on_press(Message::JumpToBottom),
+			]
 		].into()
 	}
 }

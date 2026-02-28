@@ -67,9 +67,8 @@ pub trait IContent<'a, V: 'a> {
 	/// return the first valid index, or `None` if there are no valid indices
 	fn first(&self) -> Option<usize>;
 
-	// // TODO: not needed?
-	// /// return the last valid index, or `None` if there are no valid indices
-	// fn last(&self) -> Option<usize>;
+	/// return the last valid index, or `None` if there are no valid indices
+	fn last(&self) -> Option<usize>;
 
 	/// get the item with the given index, if it exists
 	fn get(&self, idx: usize) -> Option<&V>;
@@ -98,8 +97,19 @@ pub fn sparse_list<'a, T, Message, Theme, Renderer: iced_core::Renderer>(
 	SparseList::new(content, view_item)
 }
 
+/// This *does* implement the `iced_code::widget::operation::Scrollable` interface but in a slightly
+/// nonstandard way.
+///
+/// - `snap_to` only responds to relative offsets of 0.0 (top) and 1.0 (bottom). any other value
+///   does nothing.
+/// - `scroll_to` misuses the `AbsoluteOffset` fields. both must be `Some` or else it does nothing.
+///   `y` must be the jumped-to item index *converted to an `f32` using `f32::from_bits()`.* `x` is
+///   a normal float, but it is instead interpreted as the desired Y position of the item measured
+///   from the top of the list's view. e.g. `0.0` puts the item at the top, `100.0` puts it 100
+///   pixels below the top, and `-50.0` puts it 50 pixels *above* the top.
 #[allow(missing_debug_implementations)]
 pub struct SparseList<'a, T, Message, Theme, Renderer> {
+	id: Option<widget::Id>,
 	content: &'a dyn IContent<'a, T>,
 	view_item:
 		Box<dyn Fn(usize, &'a T) -> Element<'a, Message, Theme, Renderer> + 'a>,
@@ -115,10 +125,17 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	) -> Self {
 		println!("--------------------------NEW LIST-----------------------------");
 		Self {
+			id: None,
 			content,
 			view_item: Box::new(view_item),
 			visible_elements: BTreeMap::new(),
 		}
+	}
+
+	/// Sets the [`widget::Id`] of the [`Scrollable`].
+	pub fn id(mut self, id: impl Into<widget::Id>) -> Self {
+		self.id = Some(id.into());
+		self
 	}
 
 	// fn new_element(&self, idx: usize) -> Element<'a, Message, Theme, Renderer> {
@@ -430,8 +447,15 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 		// grab the new position and offset. offset_y is where (measured from the top of the view)
 		// the new element should be positioned.
-		let NewPosition { idx: initial_idx, mut offset_y } =
-			std::mem::take(&mut state.new_position).expect("refresh without new_position");
+
+		let (initial_idx, mut offset_y) = match std::mem::take(&mut state.new_position)
+			.expect("refresh without new_position")
+		{
+			// SAFETY: both unwrap()s okay because we asserted content is not empty at top
+			NewPosition::Top                        => (self.content.first().unwrap(), 0.0),
+			NewPosition::Bottom                     => (self.content.last().unwrap(), 0.0),
+			NewPosition::Absolute { idx, offset_y } => (idx, offset_y),
+		};
 
 		// TODO: is there any requirement on offset_y? I could see it being useful to e.g. position
 		// the top of the element off the top of the view, but there's still some kind of sane
@@ -598,8 +622,10 @@ where
 	}
 
 	fn state(&self) -> tree::State {
-		let new_position =
-			self.content.first().map(|idx| NewPosition { idx, offset_y: 0.0 });
+		let new_position = match self.content.first() {
+			Some(idx) => Some(NewPosition::Absolute { idx, offset_y: 0.0 }),
+			None      => Some(NewPosition::Top),
+		};
 			// TODO: temporary
 			// self.content.last().map(|idx| NewPosition { idx, offset_y: 20.0 });
 			// self.content.items_after(self.content.first().unwrap())
@@ -899,13 +925,10 @@ where
 	) {
 		let state = tree.state.downcast_mut::<State>();
 
-		// TODO: this needed? maybe to programmatically scroll? need an id for that
-		// let bounds = layout.bounds();
-		// let content_layout = layout.children().next().unwrap();
-		// let content_bounds = content_layout.bounds();
-		// let translation = state.translation(bounds, content_bounds);
+		let bounds = layout.bounds();
+		let translation = state.translation(bounds, state.content_bounds);
 
-		// operation.scrollable(self.id.as_ref(), bounds, content_bounds, translation, state);
+		operation.scrollable(self.id.as_ref(), bounds, state.content_bounds, translation, state);
 
 		let offset = layout.position() - Point::ORIGIN;
 
@@ -993,9 +1016,10 @@ impl Offset {
 // ------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-struct NewPosition {
-	idx:      usize,
-	offset_y: f32,
+enum NewPosition {
+	Top,
+	Bottom,
+	Absolute { idx: usize, offset_y: f32 },
 }
 
 struct State {
@@ -1113,15 +1137,23 @@ impl State {
 
 	fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
 		if let Some(y) = offset.y {
-			self.offset_y = Offset::Relative(y.clamp(0.0, 1.0));
-			println!(":::::::::: scroll - State::snap_to(), offset_y = {:?}", self.offset_y);
+			let y = y.clamp(0.0, 1.0);
+
+			if y == 0.0 {
+				println!(":::::::::: scroll - State::snap_to(Top)");
+				self.new_position = Some(NewPosition::Top);
+			} else if y == 1.0 {
+				println!(":::::::::: scroll - State::snap_to(Bottom)");
+				self.new_position = Some(NewPosition::Bottom);
+			}
 		}
 	}
 
 	fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
-		if let Some(y) = offset.y {
-			self.offset_y = Offset::Absolute(y.max(0.0));
-			println!(":::::::::: scroll - State::scroll_to(), offset_y = {:?}", self.offset_y);
+		if let (Some(offset_y), Some(idx)) = (offset.x, offset.y) {
+			let idx = idx.to_bits() as usize;
+			println!(":::::::::: scroll - State::scroll_to({:04X}) {}", idx, offset_y);
+			self.new_position = Some(NewPosition::Absolute { idx, offset_y });
 		}
 	}
 
