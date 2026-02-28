@@ -107,6 +107,7 @@ pub fn sparse_list<'a, T, Message, Theme, Renderer: iced_core::Renderer>(
 ///   a normal float, but it is instead interpreted as the desired Y position of the item measured
 ///   from the top of the list's view. e.g. `0.0` puts the item at the top, `100.0` puts it 100
 ///   pixels below the top, and `-50.0` puts it 50 pixels *above* the top.
+/// - `scroll_by` works normally, though the `x` component is ignored.
 #[allow(missing_debug_implementations)]
 pub struct SparseList<'a, T, Message, Theme, Renderer> {
 	id: Option<widget::Id>,
@@ -501,7 +502,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			if state.first_index() == self.content.first().unwrap() {
 				// in this case, we're just out of elements!
 				// the desired scroll offset is forced to 0.
-				state.offset_y = Offset::Absolute(0.0);
+				state.offset_y = 0.0;
 				assert_eq!(state.y_of(state.first_index()), 0.0);
 				return Vector::ZERO;
 			} else {
@@ -515,7 +516,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 					state, renderer, state.first_index(), top_pixels_left);
 
 				if top_pixels_left > 0.0 {
-					state.offset_y = Offset::Absolute(0.0);
+					state.offset_y = 0.0;
 					assert_eq!(state.y_of(state.first_index()), 0.0);
 					return Vector::ZERO;
 				}
@@ -523,7 +524,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		}
 
 		// for scrolling, reset the state's scrolling offset and return the desired delta.
-		state.offset_y = Offset::Absolute(0.0);
+		state.offset_y = 0.0;
 		assert_eq!(state.y_of(state.first_index()), 0.0);
 		Vector::new(0.0, state.y_of(initial_idx) - offset_y)
 	}
@@ -542,7 +543,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		}
 
 		// compute current and desired scroll offsets.
-		let cur_offset_y = state.offset_y.absolute(bounds.height, state.content_bounds.height);
+		let cur_offset_y = state.absolute_offset(bounds.height, state.content_bounds.height);
 		let new_offset_y = cur_offset_y + delta.y;
 
 		let mut new_view_top = new_offset_y;
@@ -562,7 +563,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		// we ran out of items
 		if bottom_pixels_needed == 0.0 && state.first_bottom() < new_offset_y {
 			let new_offset_y = self.remove_elements_above(state, new_offset_y);
-			state.offset_y = Offset::Absolute(0.0);
+			state.offset_y = 0.0;
 			delta = Vector::new(0.0, new_offset_y);
 		}
 
@@ -578,7 +579,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			// the top of the view, and the scroll offset needs to be the absolute value of
 			// that, so that they are moved the appropriate distance up.
 			let new_offset_y = top_pixels_needed.min(0.0).abs();
-			state.offset_y = Offset::Absolute(0.0);
+			state.offset_y = 0.0;
 			delta = Vector::new(0.0, new_offset_y);
 
 			new_view_top = new_offset_y;
@@ -632,16 +633,16 @@ where
 			// .nth(9).map(|(idx, _)| NewPosition { idx, offset_y: 10.0 });
 
 		tree::State::new(State {
-			last_limits:      layout::Limits::NONE,
-			last_bounds:      Rectangle::default(),
-			changes_happened: false,
-			visible_layouts:  BTreeMap::new(),
-			content_bounds:   Rectangle::default(),
+			last_limits:        layout::Limits::NONE,
+			last_bounds:        Rectangle::default(),
+			changes_happened:   false,
+			visible_layouts:    BTreeMap::new(),
+			content_bounds:     Rectangle::default(),
 			new_position,
-
-			offset_y: Offset::Absolute(0.0),
+			offset_y:           0.0,
 			keyboard_modifiers: keyboard::Modifiers::default(),
-			last_scrolled: None,
+			last_scrolled:      None,
+			scroll_by:          None,
 		})
 	}
 
@@ -825,6 +826,14 @@ where
 						self.try_scroll(state, renderer, bounds, Vector::ZERO);
 						state.changes_happened = false;
 					}
+
+					if let Some(delta) = state.scroll_by {
+						println!("REDRAW: scrolling by {}", delta);
+						let delta = self.try_scroll(state, renderer, bounds,
+							Vector::new(0.0, delta));
+						state.scroll_and_capture(delta, bounds, state.content_bounds, shell);
+						state.scroll_by = None;
+					}
 				}
 			}
 
@@ -989,29 +998,6 @@ where
 }
 
 // ------------------------------------------------------------------------------------------------
-// Offset
-// ------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Offset {
-	Absolute(f32),
-	Relative(f32),
-}
-
-impl Offset {
-	fn absolute(self, viewport: f32, content: f32) -> f32 {
-		match self {
-			Offset::Absolute(absolute) => absolute.min((content - viewport).max(0.0)),
-			Offset::Relative(percentage) => ((content - viewport) * percentage).max(0.0),
-		}
-	}
-
-	fn translation(self, viewport: f32, content: f32) -> f32 {
-		self.absolute(viewport, content)
-	}
-}
-
-// ------------------------------------------------------------------------------------------------
 // State
 // ------------------------------------------------------------------------------------------------
 
@@ -1030,10 +1016,11 @@ struct State {
 	content_bounds:     Rectangle,
 
 	// scrolling stuff
-	offset_y:           Offset,
+	offset_y:           f32,
 	keyboard_modifiers: keyboard::Modifiers,
 	last_scrolled:      Option<Instant>,
 	new_position:       Option<NewPosition>,
+	scroll_by:          Option<f32>
 }
 
 impl operation::Scrollable for State {
@@ -1045,8 +1032,9 @@ impl operation::Scrollable for State {
 		State::scroll_to(self, offset);
 	}
 
-	fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
-		State::scroll_by(self, offset, bounds, content_bounds);
+	fn scroll_by(&mut self, offset: AbsoluteOffset, _bounds: Rectangle,
+	_content_bounds: Rectangle) {
+		State::scroll_by(self, offset.y);
 	}
 }
 
@@ -1113,10 +1101,8 @@ impl State {
 	// Scrolling stuff
 	fn scroll(&mut self, delta: Vector<f32>, bounds: Rectangle, content_bounds: Rectangle) {
 		if bounds.height < content_bounds.height {
-			self.offset_y = Offset::Absolute(
-				(self.offset_y.absolute(bounds.height, content_bounds.height) + delta.y)
-					.clamp(0.0, content_bounds.height - bounds.height),
-			);
+			self.offset_y = (self.absolute_offset(bounds.height, content_bounds.height) + delta.y)
+				.clamp(0.0, content_bounds.height - bounds.height);
 
 			// println!(":::::::::: scroll - State::scroll(), offset_y = {:?}", self.offset_y);
 		} else {
@@ -1157,22 +1143,21 @@ impl State {
 		}
 	}
 
-	fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
-		self.scroll(Vector::new(offset.x, offset.y), bounds, content_bounds);
+	fn scroll_by(&mut self, offset: f32) {
+		println!(":::::::::: scroll - State::scroll_by({})", offset);
+		self.scroll_by = Some(offset);
+	}
+
+	fn absolute_offset(&self, viewport: f32, content: f32) -> f32 {
+		self.offset_y.min((content - viewport).max(0.0))
 	}
 
 	/// Returns the scrolling translation of the [`State`], given
 	/// the bounds of the [`Scrollable`] and its contents.
-	fn translation(
-		&self,
-		bounds: Rectangle,
-		content_bounds: Rectangle,
-	) -> Vector {
+	fn translation(&self, bounds: Rectangle, content_bounds: Rectangle) -> Vector {
 		Vector::new(
 			0.0,
-			self.offset_y
-				.translation(bounds.height, content_bounds.height)
-				.round()
+			self.absolute_offset(bounds.height, content_bounds.height).round()
 		)
 	}
 }

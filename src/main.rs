@@ -71,6 +71,7 @@ enum Message {
 	JumpTo { ea: usize },
 	JumpToTop,
 	JumpToBottom,
+	Scroll { up: bool },
 
 	CodeViewChange { ea: usize, kind: CodeViewChangeKind },
 	AddItem,
@@ -569,8 +570,8 @@ impl AdiFE {
 				println!("jump to ea {:04X}", ea);
 				// self.code_pane_mut().jump_to(ea);
 				return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
-					y: Some(f32::from_bits(ea as u32)),  // ea
-					x: Some(80.0),       // pixel offset from top
+					y: Some(f32::from_bits(ea as u32)), // item index
+					x: Some(80.0),                      // pixel offset from top
 				});
 			}
 			Message::JumpToTop =>  {
@@ -585,6 +586,13 @@ impl AdiFE {
 				return operation::snap_to(CodePane::LIST_ID, RelativeOffset {
 					x: None,
 					y: Some(1.0),
+				});
+			}
+			Message::Scroll { up } => {
+				println!("scroll {}", if up { "up" } else { "down" });
+				return operation::scroll_by(CodePane::LIST_ID, AbsoluteOffset {
+					x: 0.0,
+					y: if up { -20.0 } else { 20.0 },
 				});
 			}
 
@@ -620,6 +628,10 @@ impl AdiFE {
 				button("top").on_press(Message::JumpToTop),
 				space().width(10),
 				button("bottom").on_press(Message::JumpToBottom),
+				space().width(10),
+				button("^").on_press(Message::Scroll { up: true }),
+				space().width(10),
+				button("v").on_press(Message::Scroll { up: false }),
 			]
 		].into()
 	}
