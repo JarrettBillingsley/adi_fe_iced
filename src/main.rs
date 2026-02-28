@@ -1,7 +1,7 @@
 
 use std::collections::{ BTreeMap, VecDeque };
 use std::ops::{ Bound };
-use std::cell::{ RefCell, Ref, RefMut };
+use std::cell::{ RefCell };
 
 use iced::widget::text::{ Span };
 use iced::{ Element, Font, color, Length, Border, Padding };
@@ -221,7 +221,7 @@ pub struct AdiSpan {
 }
 
 struct DummySegment {
-	end: usize,
+	// end: usize,
 	bbs: Vec<TextBB>,
 	spans: BTreeMap<usize, AdiSpan>,
 	changes: RefCell<VecDeque<ListChange>>,
@@ -231,7 +231,7 @@ impl DummySegment {
 	fn new() -> Self {
 		let bbs = dummy_code_data().to_vec();
 		Self {
-			end: 0x10000,
+			// end: 0x10000,
 			spans: bbs.iter().enumerate().map(|(i, bb)| {
 				(bb.ea,
 				AdiSpan {
@@ -326,53 +326,6 @@ impl DummySegment {
 
 		self.changes.borrow_mut().push_back(ListChange::Added { idx: ea });
 	}
-}
-
-impl<'a> IContent<'a, AdiSpan> for DummySegment {
-	fn len(&self) -> usize {
-		self.spans.len()
-	}
-
-	fn domain(&self) -> usize {
-		self.end
-	}
-
-	fn first(&self) -> Option<usize> {
-		self.spans.keys().copied().nth(0)
-	}
-
-	fn last(&self) -> Option<usize> {
-		self.spans.keys().copied().nth_back(0)
-	}
-
-	fn get(&self, idx: usize) -> Option<&AdiSpan> {
-		self.spans.get(&idx)
-	}
-
-	fn items_before(&'a self, idx: usize)
-	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
-		let mut iter = self.spans.range(..= idx);
-		iter.next_back();
-		Box::new(iter.rev().map(|(idx, span)| (*idx, span)))
-	}
-
-	fn items_after(&'a self, idx: usize)
-	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
-		Box::new(self.spans.range((Bound::Excluded(idx), Bound::Unbounded))
-			.map(|(idx, span)| (*idx, span)))
-	}
-
-	fn items_at_and_before(&'a self, idx: usize)
-	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
-		let iter = self.spans.range(..= idx);
-		Box::new(iter.rev().map(|(idx, span)| (*idx, span)))
-	}
-
-	fn items_at_and_after(&'a self, idx: usize)
-	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
-		Box::new(self.spans.range((Bound::Included(idx), Bound::Unbounded))
-			.map(|(idx, span)| (*idx, span)))
-	}
 
 	fn insert(&mut self, idx: usize, val: AdiSpan) -> Option<AdiSpan> {
 		let ret = self.spans.insert(idx, val.clone());
@@ -396,13 +349,44 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 
 		ret
 	}
+}
 
-	fn changes(&'a self) -> Ref<'a, VecDeque<ListChange>> {
-		self.changes.borrow()
+impl<'a> IContent<'a, AdiSpan> for DummySegment {
+	fn len(&self) -> usize {
+		self.spans.len()
 	}
 
-	fn changes_mut(&'a self) -> RefMut<'a, VecDeque<ListChange>> {
-		self.changes.borrow_mut()
+	// fn domain(&self) -> usize {
+	// 	self.end
+	// }
+
+	fn first(&self) -> Option<usize> {
+		self.spans.keys().copied().nth(0)
+	}
+
+	// fn last(&self) -> Option<usize> {
+	// 	self.spans.keys().copied().nth_back(0)
+	// }
+
+	fn get(&self, idx: usize) -> Option<&AdiSpan> {
+		self.spans.get(&idx)
+	}
+
+	fn items_before(&'a self, idx: usize)
+	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
+		let mut iter = self.spans.range(..= idx);
+		iter.next_back();
+		Box::new(iter.rev().map(|(idx, span)| (*idx, span)))
+	}
+
+	fn items_after(&'a self, idx: usize)
+	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
+		Box::new(self.spans.range((Bound::Excluded(idx), Bound::Unbounded))
+			.map(|(idx, span)| (*idx, span)))
+	}
+
+	fn changes(&self) -> VecDeque<ListChange> {
+		self.changes.take()
 	}
 }
 

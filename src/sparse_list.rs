@@ -9,7 +9,6 @@
 
 use std::ops::{ Bound };
 use std::time::{ Instant, Duration };
-use std::cell::{ Ref, RefMut };
 use std::collections::{ BTreeMap, VecDeque };
 
 use iced_core::{
@@ -20,6 +19,77 @@ use iced_core::{
 };
 use iced::keyboard;
 use iced::widget::scrollable::{ RelativeOffset, AbsoluteOffset };
+
+// ------------------------------------------------------------------------------------------------
+// Why isn't this method on Rectangle?
+// ------------------------------------------------------------------------------------------------
+
+trait RectangleEx {
+	fn bottom(&self) -> f32;
+}
+
+impl RectangleEx for Rectangle<f32> {
+	fn bottom(&self) -> f32 {
+		self.y + self.height
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// User-implemented interface
+// ------------------------------------------------------------------------------------------------
+
+/// Some kind of change which occurred in a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+	/// changed the item at `idx`
+	Changed { idx: usize },
+
+	/// removed the item at `idx`
+	Removed { idx: usize },
+
+	/// added an item at `idx`
+	Added   { idx: usize },
+}
+
+/// The interface to the underlying content which you must implement for `SparseList` to be able to
+/// display your items.
+pub trait IContent<'a, V: 'a> {
+	/// how many items there are; always <= `domain()`
+	fn len(&self) -> usize;
+
+	/// true if `self.len() == 0`
+	fn is_empty(&self) -> bool { self.len() == 0 }
+
+	// // TODO: not needed?
+	// /// the valid domain of indexes `[0 .. domain)`, but not every index need be present
+	// fn domain(&self) -> usize;
+
+	/// return the first valid index, or `None` if there are no valid indices
+	fn first(&self) -> Option<usize>;
+
+	// // TODO: not needed?
+	// /// return the last valid index, or `None` if there are no valid indices
+	// fn last(&self) -> Option<usize>;
+
+	/// get the item with the given index, if it exists
+	fn get(&self, idx: usize) -> Option<&V>;
+
+	/// return an iterator over the items before (and not including) the item at `idx`. The items
+	/// should be given in reverse order!
+	fn items_before(&'a self, idx: usize)
+		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
+
+	/// return an iterator over the items after (and not including) the item at `idx`
+	fn items_after(&'a self, idx: usize)
+		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
+
+	/// get a mutable queue of changes which have occurred.
+	fn changes(&self) -> VecDeque<Change>;
+}
+
+// ------------------------------------------------------------------------------------------------
+// SparseList
+// ------------------------------------------------------------------------------------------------
 
 pub fn sparse_list<'a, T, Message, Theme, Renderer: iced_core::Renderer>(
 	content: &'a dyn IContent<'a, T>,
@@ -106,11 +176,9 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// recomputes elements' y positions after the given index.
 	fn recompute_element_y_positions_after(&self, state: &mut State, idx: usize,
 	mut current_y: f32) {
-		for (idx, (layout, _)) in state.visible_layouts
+		for (_, (layout, _)) in state.visible_layouts
 			.range_mut((Bound::Excluded(idx), Bound::Unbounded))
 		{
-			println!("moving {:04X} from {} to {}", idx, layout.bounds().y, current_y);
-
 			layout.move_to_mut((0.0, current_y));
 			current_y += layout.size().height;
 		}
@@ -215,7 +283,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		while let Some((idx, bounds)) =
 			state.visible_layouts.first_key_value().map(|(k, v)| (*k, v.0.bounds()))
 		{
-			if rect_bottom(&bounds) < view_top {
+			if bounds.bottom() < view_top {
 				self.remove_element(state, idx, |height| { pixels_removed += height; });
 			} else {
 				break;
@@ -241,7 +309,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn apply_changes(&mut self, state: &mut State, renderer: &Renderer) {
-		let mut changes = self.content.changes_mut();
+		let mut changes = self.content.changes();
 
 		while let Some(change) = changes.pop_front() {
 			match change {
@@ -253,8 +321,6 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn item_changed(&mut self, state: &mut State, renderer: &Renderer, idx: usize) {
-		println!("processing changed item at {}", idx);
-
 		if state.visible_layouts.contains_key(&idx) {
 			assert!(self.visible_elements.contains_key(&idx));
 
@@ -262,12 +328,13 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			let mut height_delta: f32 = 0.0;
 			let y = state.y_of(idx);
 			self.remove_element(state, idx, |height| { height_delta -= height; });
-			self.add_element(state, renderer, idx, self.content.get(idx).unwrap(), y,
-				|height| { height_delta += height; });
+			self.add_element(state, renderer, idx,
+				self.content.get(idx).expect("item_changed on an item not in the content"),
+				y, |height| { height_delta += height; });
 
 			if height_delta != 0.0 {
 				self.recompute_element_y_positions_after(
-					state, idx, rect_bottom(&state.bounds_of(idx)));
+					state, idx, state.bottom_of(idx));
 
 				// we won't deal with spawning/removing items here - just mark self as dirty and
 				// let that happen during the draw call
@@ -277,8 +344,6 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn item_removed(&mut self, state: &mut State, idx: usize) {
-		println!("processing removal of item at {}", idx);
-
 		if state.visible_layouts.contains_key(&idx) {
 			let old_y = state.y_of(idx);
 			// it's possible self.visible_elements doesn't contain idx, if the list was recreated
@@ -290,45 +355,46 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn item_added(&mut self, state: &mut State, renderer: &Renderer, idx: usize) {
-		println!("processing newly-added item at {}", idx);
-
 		if state.visible_layouts.is_empty() {
 			// add it!
-			self.add_element(state, renderer, idx, self.content.get(idx).unwrap(), 0.0, |_|{});
+			self.add_element(state, renderer, idx,
+				self.content.get(idx).expect("item_added on an item not in the content"),
+				0.0, |_|{});
 			state.changes_happened = true;
 		} else {
 			if self.is_between_visible(idx, state) {
 				// figure out which element it's after to know Y
 				let y = self.y_pos_of_new_item(idx, state);
 				// add it
-				self.add_element(state, renderer, idx, self.content.get(idx).unwrap(), y, |_| {});
+				self.add_element(state, renderer, idx,
+					self.content.get(idx).expect("item_added on an item not in the content"),
+					y, |_| {});
 				// shift everything after it down
 				self.recompute_element_y_positions_after(
-					state, idx, rect_bottom(&state.bounds_of(idx)));
+					state, idx, state.bottom_of(idx));
 			} else if self.is_right_after_visible(idx, state) {
 				// this case is possible when there aren't many items in the list, and the
 				// newly-added item is right after the last item.
 
-				// it'll get added in update()
+				// don't have to add it here, it'll get added in update()
 				state.changes_happened = true;
 			}
-
-			// self.add_element(state, renderer, idx, self.content.get(idx).unwrap(),
 		}
 	}
 
 	fn y_pos_of_new_item(&self, new_idx: usize, state: &State) -> f32 {
 		let mut iter = state.visible_layouts.iter()
 			.skip_while(|(idx, _)| **idx < new_idx);
-		state.y_of(*iter.next().unwrap().0)
+		state.y_of(*iter.next()
+			.expect("y_pos_of_new_item called with index not between existing indices").0)
 	}
 
 	fn is_between_visible(&self, idx: usize, state: &State) -> bool {
-		idx > state.first_index().unwrap() && idx < state.last_index().unwrap()
+		idx > state.first_index() && idx < state.last_index()
 	}
 
 	fn is_right_after_visible(&self, idx: usize, state: &State) -> bool {
-		match self.content.items_after(state.last_index().unwrap()).next() {
+		match self.content.items_after(state.last_index()).next() {
 			Some((idx_after, _)) if idx == idx_after => return true,
 			_ => {}
 		}
@@ -337,6 +403,8 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn refresh(&mut self, state: &mut State, renderer: &Renderer, bounds: Rectangle) -> Vector {
+		assert!(!self.content.is_empty(), "refresh called with no items in content");
+
 		// there are four possible cases:
 		//
 		// - there are enough elements above and below to fill up the whole view
@@ -363,7 +431,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		// grab the new position and offset. offset_y is where (measured from the top of the view)
 		// the new element should be positioned.
 		let NewPosition { idx: initial_idx, mut offset_y } =
-			std::mem::take(&mut state.new_position).expect("hey, YOU called refresh");
+			std::mem::take(&mut state.new_position).expect("refresh without new_position");
 
 		// TODO: is there any requirement on offset_y? I could see it being useful to e.g. position
 		// the top of the element off the top of the view, but there's still some kind of sane
@@ -375,7 +443,8 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		// we need to first create the element from the item at initial_idx. its Y position doesn't
 		// matter because it gets recomputed by add_elements_before later.
 		self.add_element(state, renderer, initial_idx,
-			&self.content.get(initial_idx).unwrap(), 0.0, |_|{});
+			&self.content.get(initial_idx).expect("refresh on an item not in the content"),
+			0.0, |_|{});
 
 		// ------------------------------------------------------------
 		// if needed, we need to create elements before it...
@@ -396,7 +465,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 		let bottom_pixels_left = bounds.height - (offset_y + initial_bounds.height);
 		let bottom_pixels_left = self.add_elements_after(
-				state, renderer, initial_idx, rect_bottom(&initial_bounds), bottom_pixels_left);
+				state, renderer, initial_idx, initial_bounds.bottom(), bottom_pixels_left);
 
 		// note that we may have run out of items to fill up the view, but that's okay. in that case
 		// it just won't be scrollable.
@@ -404,11 +473,12 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		if bottom_pixels_left > 0.0 {
 			// ran out of elements at the bottom; that means offset_y is not achievable.
 
-			if state.first_index().unwrap() == self.content.first().unwrap() {
+			// SAFETY: asserted content is not empty at start of function
+			if state.first_index() == self.content.first().unwrap() {
 				// in this case, we're just out of elements!
 				// the desired scroll offset is forced to 0.
 				state.offset_y = Offset::Absolute(0.0);
-				assert_eq!(state.y_of(state.first_index().unwrap()), 0.0);
+				assert_eq!(state.y_of(state.first_index()), 0.0);
 				return Vector::ZERO;
 			} else {
 				// have to slide it down.
@@ -418,11 +488,11 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 				// round of adding elements before!!! and THAT can run out too... sheesh
 				let top_pixels_left = offset_y;
 				let top_pixels_left = self.add_elements_before(
-					state, renderer, state.first_index().unwrap(), top_pixels_left);
+					state, renderer, state.first_index(), top_pixels_left);
 
 				if top_pixels_left > 0.0 {
 					state.offset_y = Offset::Absolute(0.0);
-					assert_eq!(state.y_of(state.first_index().unwrap()), 0.0);
+					assert_eq!(state.y_of(state.first_index()), 0.0);
 					return Vector::ZERO;
 				}
 			}
@@ -430,7 +500,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 		// for scrolling, reset the state's scrolling offset and return the desired delta.
 		state.offset_y = Offset::Absolute(0.0);
-		assert_eq!(state.y_of(state.first_index().unwrap()), 0.0);
+		assert_eq!(state.y_of(state.first_index()), 0.0);
 		Vector::new(0.0, state.y_of(initial_idx) - offset_y)
 	}
 
@@ -455,29 +525,29 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		let mut new_view_bottom = new_view_top + bounds.height;
 
 		// add elements after the last visible element if it moves up past the bottom.
-		let last_bottom = state.last_bottom().unwrap();
+		let last_bottom = state.last_bottom();
 		let mut bottom_pixels_needed = new_view_bottom - last_bottom;
 
 		if bottom_pixels_needed > 0.0 {
 			bottom_pixels_needed = self.add_elements_after(
-				state, renderer, state.last_index().unwrap(), last_bottom, bottom_pixels_needed);
+				state, renderer, state.last_index(), last_bottom, bottom_pixels_needed);
 		}
 
 		// remove elements at the top as they move offscreen.
 		// bottom_pixels_needed == 0.0 is fine here because add_elements_after returns exactly 0.0 if
 		// we ran out of items
-		if bottom_pixels_needed == 0.0 && state.first_bottom().unwrap() < new_offset_y {
+		if bottom_pixels_needed == 0.0 && state.first_bottom() < new_offset_y {
 			let new_offset_y = self.remove_elements_above(state, new_offset_y);
 			state.offset_y = Offset::Absolute(0.0);
 			delta = Vector::new(0.0, new_offset_y);
 		}
 
 		// if top-most element's top moves below new_offset_y, need more items at top.
-		let top_pixels_needed = state.first_top().unwrap() - new_view_top;
+		let top_pixels_needed = state.first_top() - new_view_top;
 
 		if top_pixels_needed > 0.0 {
 			let top_pixels_needed = self.add_elements_before(
-				state, renderer, state.first_index().unwrap(), top_pixels_needed);
+				state, renderer, state.first_index(), top_pixels_needed);
 
 			// if top_pixels_needed > 0, we ran out of items, so the scroll offset will be 0.
 			// if top_pixels_needed is negative, there are items that will be partially scrolled-off
@@ -492,7 +562,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		}
 
 		// remove elements at the bottom as they move offsecreen
-		if state.last_top().unwrap() > new_view_bottom {
+		if state.last_top() > new_view_bottom {
 			self.remove_elements_below(state, new_view_bottom);
 		}
 
@@ -515,179 +585,6 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		}
 
 		println!("]");
-	}
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Offset {
-	Absolute(f32),
-	Relative(f32),
-}
-
-impl Offset {
-	fn absolute(self, viewport: f32, content: f32) -> f32 {
-		match self {
-			Offset::Absolute(absolute) => absolute.min((content - viewport).max(0.0)),
-			Offset::Relative(percentage) => ((content - viewport) * percentage).max(0.0),
-		}
-	}
-
-	fn translation(self, viewport: f32, content: f32) -> f32 {
-		self.absolute(viewport, content)
-	}
-}
-
-#[derive(Clone, Copy)]
-struct NewPosition {
-	idx:      usize,
-	offset_y: f32,
-}
-
-struct State {
-	last_limits:        layout::Limits,
-	last_bounds:        Rectangle,
-	changes_happened:   bool,
-	visible_layouts:    BTreeMap<usize, (layout::Node, Tree)>,
-	content_bounds:     Rectangle,
-
-	// scrolling stuff
-	offset_y:           Offset,
-	keyboard_modifiers: keyboard::Modifiers,
-	last_scrolled:      Option<Instant>,
-	new_position:       Option<NewPosition>,
-}
-
-impl operation::Scrollable for State {
-	fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
-		State::snap_to(self, offset);
-	}
-
-	fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
-		State::scroll_to(self, offset);
-	}
-
-	fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
-		State::scroll_by(self, offset, bounds, content_bounds);
-	}
-}
-
-// somehow this isn't a method on Rectangle, despite needing it all the time
-fn rect_bottom(r: &Rectangle) -> f32 {
-	r.y + r.height
-}
-
-impl State {
-	fn needs_refresh(&self) -> bool {
-		self.new_position.is_some()
-	}
-
-	fn limits_without_max_height(&self) -> layout::Limits {
-		layout::Limits::new(
-			self.last_limits.min(),
-			Size::new(self.last_limits.max().width, f32::INFINITY)
-		)
-	}
-
-	fn bounds_of(&self, idx: usize) -> Rectangle {
-		self.visible_layouts.get(&idx).unwrap().0.bounds()
-	}
-
-	fn y_of(&self, idx: usize) -> f32 {
-		self.bounds_of(idx).y
-	}
-
-	fn height_of(&self, idx: usize) -> f32 {
-		self.bounds_of(idx).height
-	}
-
-	fn first_index(&self) -> Option<usize> {
-		self.visible_layouts.first_key_value().map(|(idx, _)| *idx)
-	}
-
-	fn last_index(&self) -> Option<usize> {
-		self.visible_layouts.last_key_value().map(|(idx, _)| *idx)
-	}
-
-	fn first_layout(&self) -> Option<&layout::Node> {
-		self.visible_layouts.first_key_value().map(|(_, (layout, _))| layout)
-	}
-
-	fn last_layout(&self) -> Option<&layout::Node> {
-		self.visible_layouts.last_key_value().map(|(_, (layout, _))| layout)
-	}
-
-	fn first_top(&self) -> Option<f32> {
-		self.first_layout().map(|layout| layout.bounds().y)
-	}
-
-	fn last_top(&self) -> Option<f32> {
-		self.last_layout().map(|layout| layout.bounds().y)
-	}
-
-	fn first_bottom(&self) -> Option<f32> {
-		self.first_layout().map(|layout| rect_bottom(&layout.bounds()))
-	}
-
-	fn last_bottom(&self) -> Option<f32> {
-		self.last_layout().map(|layout| rect_bottom(&layout.bounds()))
-	}
-
-	// Scrolling stuff
-	fn scroll(&mut self, delta: Vector<f32>, bounds: Rectangle, content_bounds: Rectangle) {
-		if bounds.height < content_bounds.height {
-			self.offset_y = Offset::Absolute(
-				(self.offset_y.absolute(bounds.height, content_bounds.height) + delta.y)
-					.clamp(0.0, content_bounds.height - bounds.height),
-			);
-
-			// println!(":::::::::: scroll - State::scroll(), offset_y = {:?}", self.offset_y);
-		} else {
-			// println!(":::::::::: scroll - State::scroll() didn't scroll, bounds = {:?}, \
-			// 	content_bounds = {:?}", bounds, content_bounds);
-		}
-	}
-
-	fn scroll_and_capture<Message>(&mut self, delta: Vector<f32>, bounds: Rectangle,
-	content_bounds: Rectangle, shell: &mut Shell<'_, Message>) {
-		self.scroll(delta, bounds, content_bounds);
-
-		if content_bounds.width > bounds.width || content_bounds.height > bounds.height {
-			self.last_scrolled = Some(Instant::now());
-			shell.capture_event();
-		}
-	}
-
-	fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
-		if let Some(y) = offset.y {
-			self.offset_y = Offset::Relative(y.clamp(0.0, 1.0));
-			println!(":::::::::: scroll - State::snap_to(), offset_y = {:?}", self.offset_y);
-		}
-	}
-
-	fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
-		if let Some(y) = offset.y {
-			self.offset_y = Offset::Absolute(y.max(0.0));
-			println!(":::::::::: scroll - State::scroll_to(), offset_y = {:?}", self.offset_y);
-		}
-	}
-
-	fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
-		self.scroll(Vector::new(offset.x, offset.y), bounds, content_bounds);
-	}
-
-	/// Returns the scrolling translation of the [`State`], given
-	/// the bounds of the [`Scrollable`] and its contents.
-	fn translation(
-		&self,
-		bounds: Rectangle,
-		content_bounds: Rectangle,
-	) -> Vector {
-		Vector::new(
-			0.0,
-			self.offset_y
-				.translation(bounds.height, content_bounds.height)
-				.round()
-		)
 	}
 }
 
@@ -757,18 +654,18 @@ where
 		let bounds = layout.bounds();
 
 		if bounds != state.last_bounds {
+			// if the width changed, change the widths of all the visible items.
 			if bounds.width != state.last_bounds.width {
 				self.relayout_items(state, renderer);
 			}
 
+			// if the height changed, that could cause items to need to be added/removed.
 			if bounds.height != state.last_bounds.height {
 				self.try_scroll(state, renderer, bounds, Vector::ZERO);
 			}
 
 			state.last_bounds = bounds;
 		}
-
-		let cursor_over_scrollable = cursor.position_over(bounds);
 
 		let last_offset_y = state.offset_y;
 
@@ -791,6 +688,7 @@ where
 		}
 
 		let offset = layout.position() - Point::ORIGIN;
+		let cursor_over_scrollable = cursor.position_over(bounds);
 
 		if state.last_scrolled.is_none()
 			|| !matches!(event, Event::Mouse(mouse::Event::WheelScrolled { .. }))
@@ -887,25 +785,20 @@ where
 				if state.needs_refresh() {
 					let delta = self.refresh(state, renderer, bounds);
 					state.scroll_and_capture(delta, bounds, state.content_bounds, shell);
-				} else if self.elements_need_to_be_recreated(state) {
-					// this SparseList was recreated - the elements must be recreated from the
-					// layouts in the state.
-					self.recreate_elements(state);
+				} else {
+					if self.elements_need_to_be_recreated(state) {
+						// this SparseList was recreated - the elements must be recreated from the
+						// layouts in the state.
+						self.recreate_elements(state);
 
-					// and apply any pending changes, now that everything is recreated.
-					self.apply_changes(&mut state, renderer);
+						// and apply any pending changes, now that everything is recreated.
+						self.apply_changes(&mut state, renderer);
+					}
 
-					// we *could* request a redraw here, which would run the bottom-most else, but
-					// it causes flickering.
 					if state.changes_happened {
-						println!("changes happened, reworking visible elements 1");
 						self.try_scroll(state, renderer, bounds, Vector::ZERO);
 						state.changes_happened = false;
 					}
-				} else if state.changes_happened {
-					println!("changes happened, reworking visible elements 2");
-					self.try_scroll(state, renderer, bounds, Vector::ZERO);
-					state.changes_happened = false;
 				}
 			}
 
@@ -1072,75 +965,182 @@ where
 	}
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Change {
-	/// item at `idx` was changed
-	Changed { idx: usize },
+// ------------------------------------------------------------------------------------------------
+// Offset
+// ------------------------------------------------------------------------------------------------
 
-	/// removed the item at `idx`
-	Removed { idx: usize },
-
-	/// added an item at `idx`
-	Added   { idx: usize },
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Offset {
+	Absolute(f32),
+	Relative(f32),
 }
 
-pub trait IContent<'a, V: 'a> {
-	// TODO: not needed?
-	/// how many items there are; always <= `domain()`
-	fn len(&self) -> usize;
+impl Offset {
+	fn absolute(self, viewport: f32, content: f32) -> f32 {
+		match self {
+			Offset::Absolute(absolute) => absolute.min((content - viewport).max(0.0)),
+			Offset::Relative(percentage) => ((content - viewport) * percentage).max(0.0),
+		}
+	}
 
-	// TODO: not needed?
-	/// true if `self.len() == 0`
-	fn is_empty(&self) -> bool { self.len() == 0 }
+	fn translation(self, viewport: f32, content: f32) -> f32 {
+		self.absolute(viewport, content)
+	}
+}
 
-	/// the valid domain of indexes `[0 .. domain)`, but not every index need be present
-	fn domain(&self) -> usize;
+// ------------------------------------------------------------------------------------------------
+// State
+// ------------------------------------------------------------------------------------------------
 
-	// TODO: not needed?
-	/// return the first valid index, or `None` if there are no valid indices
-	fn first(&self) -> Option<usize>;
+#[derive(Clone, Copy)]
+struct NewPosition {
+	idx:      usize,
+	offset_y: f32,
+}
 
-	// TODO: not needed?
-	/// return the last valid index, or `None` if there are no valid indices
-	fn last(&self) -> Option<usize>;
+struct State {
+	last_limits:        layout::Limits,
+	last_bounds:        Rectangle,
+	changes_happened:   bool,
+	visible_layouts:    BTreeMap<usize, (layout::Node, Tree)>,
+	content_bounds:     Rectangle,
 
-	/// get the item with the given index, if it exists
-	fn get(&self, idx: usize) -> Option<&V>;
+	// scrolling stuff
+	offset_y:           Offset,
+	keyboard_modifiers: keyboard::Modifiers,
+	last_scrolled:      Option<Instant>,
+	new_position:       Option<NewPosition>,
+}
 
-	// TODO: not needed?
-	/// return an iterator over the items before (and not including) the item at `idx`. The items
-	/// should be given in reverse order!
-	fn items_before(&'a self, idx: usize)
-		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
+impl operation::Scrollable for State {
+	fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
+		State::snap_to(self, offset);
+	}
 
-	/// return an iterator over the items after (and not including) the item at `idx`
-	fn items_after(&'a self, idx: usize)
-		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
+	fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
+		State::scroll_to(self, offset);
+	}
 
-	// TODO: not needed?
-	/// return an iterator over the items before and including the item at `idx`. The items should
-	/// be given in reverse order!
-	fn items_at_and_before(&'a self, idx: usize)
-		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
+	fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
+		State::scroll_by(self, offset, bounds, content_bounds);
+	}
+}
 
-	/// return an iterator over the items after and including the item at `idx`
-	fn items_at_and_after(&'a self, idx: usize)
-		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
+impl State {
+	fn needs_refresh(&self) -> bool {
+		self.new_position.is_some()
+	}
 
-	// TODO: not needed?
-	/// set the item at the given index to the given value. if `idx` was not present, returns
-	/// `None`; otherwise, returns the old value at this index.
-	fn insert(&mut self, idx: usize, val: V) -> Option<V>;
+	fn limits_without_max_height(&self) -> layout::Limits {
+		layout::Limits::new(
+			self.last_limits.min(),
+			Size::new(self.last_limits.max().width, f32::INFINITY)
+		)
+	}
 
-	// TODO: not needed?
-	/// try to remove the item at the given index; returns `true` if there was an item there and
-	/// `false` if there wasn't
-	fn remove(&mut self, idx: usize) -> bool;
+	fn bounds_of(&self, idx: usize) -> Rectangle {
+		self.visible_layouts.get(&idx).expect("bounds_of on a nonexistent item").0.bounds()
+	}
 
-	// TODO: not needed?
-	/// get the queue of changes which have occurred.
-	fn changes(&'a self) -> Ref<'a, VecDeque<Change>>;
+	fn y_of(&self, idx: usize) -> f32 {
+		self.bounds_of(idx).y
+	}
 
-	/// same as above but mutable
-	fn changes_mut(&'a self) -> RefMut<'a, VecDeque<Change>>;
+	fn height_of(&self, idx: usize) -> f32 {
+		self.bounds_of(idx).height
+	}
+
+	fn bottom_of(&self, idx: usize) -> f32 {
+		self.bounds_of(idx).bottom()
+	}
+
+	fn first_index(&self) -> usize {
+		*self.visible_layouts.first_key_value().expect("first_index with no items in content").0
+	}
+
+	fn last_index(&self) -> usize {
+		*self.visible_layouts.last_key_value().expect("last_index with no items in content").0
+	}
+
+	fn first_layout(&self) -> &layout::Node {
+		&self.visible_layouts.first_key_value().expect("first_layout with no items in content").1.0
+	}
+
+	fn last_layout(&self) -> &layout::Node {
+		&self.visible_layouts.last_key_value().expect("last_layout with no items in content").1.0
+	}
+
+	fn first_top(&self) -> f32 {
+		self.first_layout().bounds().y
+	}
+
+	fn last_top(&self) -> f32 {
+		self.last_layout().bounds().y
+	}
+
+	fn first_bottom(&self) -> f32 {
+		self.first_layout().bounds().bottom()
+	}
+
+	fn last_bottom(&self) -> f32 {
+		self.last_layout().bounds().bottom()
+	}
+
+	// Scrolling stuff
+	fn scroll(&mut self, delta: Vector<f32>, bounds: Rectangle, content_bounds: Rectangle) {
+		if bounds.height < content_bounds.height {
+			self.offset_y = Offset::Absolute(
+				(self.offset_y.absolute(bounds.height, content_bounds.height) + delta.y)
+					.clamp(0.0, content_bounds.height - bounds.height),
+			);
+
+			// println!(":::::::::: scroll - State::scroll(), offset_y = {:?}", self.offset_y);
+		} else {
+			// println!(":::::::::: scroll - State::scroll() didn't scroll, bounds = {:?}, \
+			// 	content_bounds = {:?}", bounds, content_bounds);
+		}
+	}
+
+	fn scroll_and_capture<Message>(&mut self, delta: Vector<f32>, bounds: Rectangle,
+	content_bounds: Rectangle, shell: &mut Shell<'_, Message>) {
+		self.scroll(delta, bounds, content_bounds);
+
+		if content_bounds.width > bounds.width || content_bounds.height > bounds.height {
+			self.last_scrolled = Some(Instant::now());
+			shell.capture_event();
+		}
+	}
+
+	fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
+		if let Some(y) = offset.y {
+			self.offset_y = Offset::Relative(y.clamp(0.0, 1.0));
+			println!(":::::::::: scroll - State::snap_to(), offset_y = {:?}", self.offset_y);
+		}
+	}
+
+	fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
+		if let Some(y) = offset.y {
+			self.offset_y = Offset::Absolute(y.max(0.0));
+			println!(":::::::::: scroll - State::scroll_to(), offset_y = {:?}", self.offset_y);
+		}
+	}
+
+	fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
+		self.scroll(Vector::new(offset.x, offset.y), bounds, content_bounds);
+	}
+
+	/// Returns the scrolling translation of the [`State`], given
+	/// the bounds of the [`Scrollable`] and its contents.
+	fn translation(
+		&self,
+		bounds: Rectangle,
+		content_bounds: Rectangle,
+	) -> Vector {
+		Vector::new(
+			0.0,
+			self.offset_y
+				.translation(bounds.height, content_bounds.height)
+				.round()
+		)
+	}
 }
