@@ -7,6 +7,11 @@
 ///! really have a concept of a "scroll position" the way a real Scrollable does. Scrolling is
 ///! instead kind of always relative to the current position.
 
+use std::ops::{ Bound };
+use std::time::{ Instant, Duration };
+use std::cell::{ Ref, RefMut };
+use std::collections::{ BTreeMap, VecDeque };
+
 use iced_core::{
 	self, Clipboard, Element, Layout, Length, Point, Rectangle, Shell,
 	Size, Vector, Widget, InputMethod,
@@ -15,11 +20,6 @@ use iced_core::{
 };
 use iced::keyboard;
 use iced::widget::scrollable::{ RelativeOffset, AbsoluteOffset };
-
-use std::time::{ Instant, Duration };
-use std::cell::{ Ref, RefMut };
-use std::collections::VecDeque;
-use std::collections::BTreeMap;
 
 pub fn sparse_list<'a, T, Message, Theme, Renderer: iced_core::Renderer>(
 	content: &'a dyn IContent<'a, T>,
@@ -43,6 +43,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		view_item: impl Fn(usize, &'a T) -> Element<'a, Message, Theme, Renderer>
 			+ 'a,
 	) -> Self {
+		println!("--------------------------NEW LIST-----------------------------");
 		Self {
 			content,
 			view_item: Box::new(view_item),
@@ -50,9 +51,9 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		}
 	}
 
-	fn new_element(&self, idx: usize) -> Element<'a, Message, Theme, Renderer> {
-		self.new_element_with(idx, &self.content.get(idx).unwrap())
-	}
+	// fn new_element(&self, idx: usize) -> Element<'a, Message, Theme, Renderer> {
+	// 	self.new_element_with(idx, &self.content.get(idx).unwrap())
+	// }
 
 	fn new_element_with(&self, idx: usize, item: &'a T) -> Element<'a, Message, Theme, Renderer> {
 		(self.view_item)(idx, item)
@@ -60,32 +61,36 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 	// passing the element in and returning it seems silly but BORROW CHECKER REASONS (well,
 	// really, "lack of impl Borrow for &mut Element" reasons but same diff)
-	fn layout_element(&self, limits: &layout::Limits, renderer: &Renderer, y: f32,
-	mut element: Element<'a, Message, Theme, Renderer>)
-	-> (Element<'a, Message, Theme, Renderer>, Tree, layout::Node) {
-		let limits = layout::Limits::new(
-			limits.min(),
-			Size::new(
-				limits.max().width,
-				f32::INFINITY
-			)
-		);
-
-		let mut tree = Tree::new(&element);
-
+	fn layout_element(&self, mut tree: &mut Tree, limits: &layout::Limits, renderer: &Renderer,
+		y: f32, mut element: Element<'a, Message, Theme, Renderer>)
+	-> (Element<'a, Message, Theme, Renderer>, layout::Node) {
 		let layout = element
 			.as_widget_mut()
 			.layout(&mut tree, renderer, &limits)
 			.move_to((0.0, y));
 
-		(element, tree, layout)
+		(element, layout)
+	}
+
+	fn elements_need_to_be_recreated(&self, state: &State) -> bool {
+		// println!("ELEMENTS = {}, LAYOUTS = {}",
+		// 	self.visible_elements.len(), state.visible_layouts.len());
+		assert!((self.visible_elements.len() == state.visible_layouts.len()) ||
+			(self.visible_elements.is_empty() && !state.visible_layouts.is_empty()));
+
+		self.visible_elements.is_empty() && !state.visible_layouts.is_empty()
 	}
 
 	/// recreate elements from layouts after this list has been recreated.
 	fn recreate_elements(&mut self, state: &State) {
 		for (idx, _) in state.visible_layouts.iter() {
-			self.visible_elements.insert(*idx, self.new_element(*idx));
+			// if the item was removed from self.content, don't recreate the element.
+			if let Some(item) = self.content.get(*idx) {
+				self.visible_elements.insert(*idx, self.new_element_with(*idx, item));
+			}
 		}
+
+		self.dump_visible_indexes();
 	}
 
 	/// recomputes all elements' y positions so they start at 0.0 and increase.
@@ -98,15 +103,23 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		}
 	}
 
+	/// recomputes elements' y positions after the given index.
+	fn recompute_element_y_positions_after(&self, state: &mut State, idx: usize,
+	mut current_y: f32) {
+		for (idx, (layout, _)) in state.visible_layouts
+			.range_mut((Bound::Excluded(idx), Bound::Unbounded))
+		{
+			println!("moving {:04X} from {} to {}", idx, layout.bounds().y, current_y);
+
+			layout.move_to_mut((0.0, current_y));
+			current_y += layout.size().height;
+		}
+	}
+
+
 	/// called when the width of the container changes.
 	fn relayout_items(&mut self, state: &mut State, renderer: &Renderer) {
-		let limits = layout::Limits::new(
-			state.last_limits.min(),
-			Size::new(
-				state.last_limits.max().width,
-				f32::INFINITY
-			)
-		);
+		let limits = state.limits_without_max_height();
 
 		for ((_, element), (_, (layout, tree))) in
 			self.visible_elements.iter_mut().zip(&mut state.visible_layouts)
@@ -124,7 +137,8 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	fn add_element(&mut self, state: &mut State, renderer: &Renderer, idx: usize, item: &'a T,
 	y: f32, mut heightfn: impl FnMut(f32) -> ()) {
 		let element = self.new_element_with(idx, item);
-		let (element, tree, layout) = self.layout_element(&state.last_limits,
+		let mut tree = Tree::new(&element);
+		let (element, layout) = self.layout_element(&mut tree, &state.limits_without_max_height(),
 			renderer, y, element);
 
 		let height = layout.size().height;
@@ -147,9 +161,10 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		state.visible_layouts.remove(&idx);
 		self.visible_elements.remove(&idx);
 
-		// IMPLICATION... A -> B == !A || B
-		assert!(!state.visible_layouts.is_empty() || state.content_bounds.height == 0.0,
-			"0 elements should give 0 height!");
+		// I hate floats.
+		if state.visible_layouts.is_empty() {
+			state.content_bounds.height = 0.0;
+		}
 	}
 
 	/// returns the required scroll offset to put the item at `original_idx` at the right Y position
@@ -157,6 +172,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// items before it).
 	fn add_elements_before(&mut self, state: &mut State, renderer: &Renderer, original_idx: usize,
 	mut pixels_remaining: f32) -> f32 {
+		// println!("+ adding elements before {} ({} pixels)", original_idx, pixels_remaining);
 		for (idx, item) in self.content.items_before(original_idx) {
 			if pixels_remaining <= 0.0 { break; }
 			self.add_element(state, renderer, idx, item, 0.0, |height| {
@@ -173,6 +189,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// if we ran out of elements (at the end of the list).
 	fn add_elements_after(&mut self, state: &mut State, renderer: &Renderer, original_idx: usize,
 	mut current_y: f32, mut pixels_remaining: f32) -> f32 {
+		// println!("+ adding elements after {} ({} pixels)", original_idx, pixels_remaining);
 		let mut ran_out_of_items = true;
 		for (idx, item) in self.content.items_after(original_idx) {
 			if pixels_remaining <= 0.0 {
@@ -191,8 +208,8 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 	/// removes elements at start of view as long as their bottom is below `view_top`. returns the
 	/// new updated scroll offset.
-	fn remove_elements_above(&mut self, state: &mut State, view_top: f32)
-	-> f32 {
+	fn remove_elements_above(&mut self, state: &mut State, view_top: f32) -> f32 {
+		// println!("- removing elements above {}", view_top);
 		let mut pixels_removed = 0.0;
 
 		while let Some((idx, bounds)) =
@@ -211,6 +228,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 	/// removes elements at end of view as long as their top is below `view_bottom`.
 	fn remove_elements_below(&mut self, state: &mut State, view_bottom: f32) {
+		// println!("- removing elements below {}", view_bottom);
 		while let Some((idx, bounds)) =
 			state.visible_layouts.last_key_value().map(|(k, v)| (*k, v.0.bounds()))
 		{
@@ -222,31 +240,100 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		}
 	}
 
-	fn item_changed(&mut self, state: &mut State, _renderer: &Renderer, idx: usize) {
+	fn apply_changes(&mut self, state: &mut State, renderer: &Renderer) {
+		let mut changes = self.content.changes_mut();
+
+		while let Some(change) = changes.pop_front() {
+			match change {
+				Change::Changed { idx } => self.item_changed(state, renderer, idx),
+				Change::Removed { idx } => self.item_removed(state, idx),
+				Change::Added   { idx } => self.item_added  (state, renderer, idx),
+			}
+		}
+	}
+
+	fn item_changed(&mut self, state: &mut State, renderer: &Renderer, idx: usize) {
 		println!("processing changed item at {}", idx);
 
-		// let size = self.layout_element(&state.last_limits, renderer, 0.0, self.new_element(idx))
-		//     .2.size();
+		if state.visible_layouts.contains_key(&idx) {
+			assert!(self.visible_elements.contains_key(&idx));
 
-		// it may seem wasteful to clear the visible layouts, buuuuuuut the SparseList widget itself
-		// is usually recreated every time these methods are called, meaning visible_elements is
-		// empty, meaning visible_layouts needs to be recomputed anyway.
-		state.visible_layouts.clear();
+			// recreate and re-lay-out, move other layouts up/down
+			let mut height_delta: f32 = 0.0;
+			let y = state.y_of(idx);
+			self.remove_element(state, idx, |height| { height_delta -= height; });
+			self.add_element(state, renderer, idx, self.content.get(idx).unwrap(), y,
+				|height| { height_delta += height; });
+
+			if height_delta != 0.0 {
+				self.recompute_element_y_positions_after(
+					state, idx, rect_bottom(&state.bounds_of(idx)));
+
+				// we won't deal with spawning/removing items here - just mark self as dirty and
+				// let that happen during the draw call
+				state.changes_happened = true;
+			}
+		}
 	}
 
 	fn item_removed(&mut self, state: &mut State, idx: usize) {
 		println!("processing removal of item at {}", idx);
 
-		state.visible_layouts.clear();
+		if state.visible_layouts.contains_key(&idx) {
+			let old_y = state.y_of(idx);
+			// it's possible self.visible_elements doesn't contain idx, if the list was recreated
+			// and that content was deleted.
+			self.remove_element(state, idx, |_| {});
+			self.recompute_element_y_positions_after(state, idx, old_y);
+			state.changes_happened = true;
+		}
 	}
 
-	fn item_added(&mut self, state: &mut State, _renderer: &Renderer, idx: usize) {
+	fn item_added(&mut self, state: &mut State, renderer: &Renderer, idx: usize) {
 		println!("processing newly-added item at {}", idx);
-		// compute the size
-		// let size = self.layout_element(&state.last_limits, renderer, 0.0, self.new_element(idx))
-		//     .2.size();
 
-		state.visible_layouts.clear();
+		if state.visible_layouts.is_empty() {
+			// add it!
+			self.add_element(state, renderer, idx, self.content.get(idx).unwrap(), 0.0, |_|{});
+			state.changes_happened = true;
+		} else {
+			if self.is_between_visible(idx, state) {
+				// figure out which element it's after to know Y
+				let y = self.y_pos_of_new_item(idx, state);
+				// add it
+				self.add_element(state, renderer, idx, self.content.get(idx).unwrap(), y, |_| {});
+				// shift everything after it down
+				self.recompute_element_y_positions_after(
+					state, idx, rect_bottom(&state.bounds_of(idx)));
+			} else if self.is_right_after_visible(idx, state) {
+				// this case is possible when there aren't many items in the list, and the
+				// newly-added item is right after the last item.
+
+				// it'll get added in update()
+				state.changes_happened = true;
+			}
+
+			// self.add_element(state, renderer, idx, self.content.get(idx).unwrap(),
+		}
+	}
+
+	fn y_pos_of_new_item(&self, new_idx: usize, state: &State) -> f32 {
+		let mut iter = state.visible_layouts.iter()
+			.skip_while(|(idx, _)| **idx < new_idx);
+		state.y_of(*iter.next().unwrap().0)
+	}
+
+	fn is_between_visible(&self, idx: usize, state: &State) -> bool {
+		idx > state.first_index().unwrap() && idx < state.last_index().unwrap()
+	}
+
+	fn is_right_after_visible(&self, idx: usize, state: &State) -> bool {
+		match self.content.items_after(state.last_index().unwrap()).next() {
+			Some((idx_after, _)) if idx == idx_after => return true,
+			_ => {}
+		}
+
+		false
 	}
 
 	fn refresh(&mut self, state: &mut State, renderer: &Renderer, bounds: Rectangle) -> Vector {
@@ -350,6 +437,9 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// about to scroll by `delta`; check if we need to manifest new items in the direction of
 	/// scrolling (and delete old ones that fall off the other end). returns the adjusted delta
 	/// to be passed to state.scroll()
+	///
+	/// also this name is not the best, since this is sometimes called with a delta of 0 to just
+	/// spawn/remove items when e.g. the bounds changed or items were added/removed/changed
 	fn try_scroll(&mut self, state: &mut State, renderer: &Renderer, bounds: Rectangle,
 	mut delta: Vector) -> Vector {
 		// nothing to do if there are no items to display.
@@ -456,6 +546,7 @@ struct NewPosition {
 struct State {
 	last_limits:        layout::Limits,
 	last_bounds:        Rectangle,
+	changes_happened:   bool,
 	visible_layouts:    BTreeMap<usize, (layout::Node, Tree)>,
 	content_bounds:     Rectangle,
 
@@ -488,6 +579,13 @@ fn rect_bottom(r: &Rectangle) -> f32 {
 impl State {
 	fn needs_refresh(&self) -> bool {
 		self.new_position.is_some()
+	}
+
+	fn limits_without_max_height(&self) -> layout::Limits {
+		layout::Limits::new(
+			self.last_limits.min(),
+			Size::new(self.last_limits.max().width, f32::INFINITY)
+		)
 	}
 
 	fn bounds_of(&self, idx: usize) -> Rectangle {
@@ -604,15 +702,16 @@ where
 
 	fn state(&self) -> tree::State {
 		let new_position =
-			// self.content.last().map(|idx| NewPosition { idx, offset_y: 200.0 });
+			self.content.first().map(|idx| NewPosition { idx, offset_y: 0.0 });
 			// TODO: temporary
 			// self.content.last().map(|idx| NewPosition { idx, offset_y: 20.0 });
-			self.content.items_after(self.content.first().unwrap())
-			.nth(9).map(|(idx, _)| NewPosition { idx, offset_y: 10.0 });
+			// self.content.items_after(self.content.first().unwrap())
+			// .nth(9).map(|(idx, _)| NewPosition { idx, offset_y: 10.0 });
 
 		tree::State::new(State {
 			last_limits:      layout::Limits::NONE,
 			last_bounds:      Rectangle::default(),
+			changes_happened: false,
 			visible_layouts:  BTreeMap::new(),
 			content_bounds:   Rectangle::default(),
 			new_position,
@@ -632,19 +731,11 @@ where
 
 	fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits)
 	-> layout::Node {
-		let state = tree.state.downcast_mut::<State>();
+		let mut state = tree.state.downcast_mut::<State>();
 		state.last_limits = limits.loose();
 
-		if !state.needs_refresh() {
-			let mut changes = self.content.changes_mut();
-
-			while let Some(change) = changes.pop_front() {
-				match change {
-					Change::Changed { idx } => self.item_changed(state, renderer, idx),
-					Change::Removed { idx } => self.item_removed(state, idx),
-					Change::Added   { idx } => self.item_added  (state, renderer, idx),
-				}
-			}
+		if !state.needs_refresh() && !self.elements_need_to_be_recreated(state) {
+			self.apply_changes(&mut state, renderer);
 		}
 
 		layout::Node::new(limits.resolve(Length::Fill, Length::Fill, state.content_bounds.size()))
@@ -661,7 +752,7 @@ where
 		shell: &mut Shell<'_, Message>,
 		_viewport: &Rectangle,
 	) {
-		let state = tree.state.downcast_mut::<State>();
+		let mut state = tree.state.downcast_mut::<State>();
 
 		let bounds = layout.bounds();
 
@@ -796,10 +887,25 @@ where
 				if state.needs_refresh() {
 					let delta = self.refresh(state, renderer, bounds);
 					state.scroll_and_capture(delta, bounds, state.content_bounds, shell);
-				} else if self.visible_elements.is_empty() && !state.visible_layouts.is_empty() {
+				} else if self.elements_need_to_be_recreated(state) {
 					// this SparseList was recreated - the elements must be recreated from the
 					// layouts in the state.
 					self.recreate_elements(state);
+
+					// and apply any pending changes, now that everything is recreated.
+					self.apply_changes(&mut state, renderer);
+
+					// we *could* request a redraw here, which would run the bottom-most else, but
+					// it causes flickering.
+					if state.changes_happened {
+						println!("changes happened, reworking visible elements 1");
+						self.try_scroll(state, renderer, bounds, Vector::ZERO);
+						state.changes_happened = false;
+					}
+				} else if state.changes_happened {
+					println!("changes happened, reworking visible elements 2");
+					self.try_scroll(state, renderer, bounds, Vector::ZERO);
+					state.changes_happened = false;
 				}
 			}
 

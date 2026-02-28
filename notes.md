@@ -1,10 +1,10 @@
 
-- item_changed/removed/added can also cause elements to need to be spawned/despawned
 - programmatic scrolling - is that what the operation thing is for?
 - ditch Offset::Relative if not needed
 
 - JANK:
 	- short view, scroll to bottom, expand height -> items stay at top of view, until you scroll again. at least it doesn't crash
+	- if you contract a visible BB, it pulls items up at first... but doesn't spawn new items after, and starts pulling the top of the BB down instead. why?
 
 ---
 
@@ -80,3 +80,14 @@ on refresh(), we've got four possible cases:
 		- slide offset down
 		- items before, if ran out,
 			- set offset to 0 and return
+
+---
+
+when adding an item there are a number of cases where it should be added and 
+
+- there are no elements.
+	- add it!
+- it's adjacent to existing elements.
+	- if it'd be onscreen, add it. (handles case where only a few elements in list)
+- it's between existing elements.
+	- add it - figure out what it's between to know Y, insert it, shift everything after it down

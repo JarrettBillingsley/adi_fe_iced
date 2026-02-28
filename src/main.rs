@@ -59,7 +59,8 @@ impl FontEx for Font {
 enum CodeViewChangeKind {
 	Split,
 	Delete,
-	Modify,
+	Expand,
+	Contract,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +70,7 @@ enum Message {
 	OperandClicked { ea: usize, opn: usize },
 
 	CodeViewChange { ea: usize, kind: CodeViewChangeKind },
+	AddItem,
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -131,7 +133,7 @@ impl TextBB {
 // Dummy code data
 // ------------------------------------------------------------------------------------------------
 
-const NUM_CODE_SPANS: usize = 500;
+const NUM_CODE_SPANS: usize = 50;
 
 const MNEMONICS: &[&'static str] = &[
 	"lda", "sta", "bpl", "jsr", "rts", "dex", "pha",
@@ -284,12 +286,45 @@ impl DummySegment {
 		}
 	}
 
-	fn modify(&mut self, ea: usize) {
+	fn expand(&mut self, ea: usize) {
 		let span = self.spans.get(&ea).unwrap();
 		let SpanKind::Code(bbidx) = span.kind else { panic!() };
 		let bb = &mut self.bbs[bbidx];
 		bb.code.push(("FUCK".into(), "123".into()));
 		self.changes.borrow_mut().push_back(ListChange::Changed { idx: ea });
+	}
+
+	fn contract(&mut self, ea: usize) {
+		let span = self.spans.get(&ea).unwrap();
+		let SpanKind::Code(bbidx) = span.kind else { panic!() };
+		let bb = &mut self.bbs[bbidx];
+
+		if bb.code.len() > 1 {
+			bb.code.pop();
+			self.changes.borrow_mut().push_back(ListChange::Changed { idx: ea });
+		}
+	}
+
+	fn add(&mut self) {
+		let ea = match self.spans.last_key_value() {
+			Some((_, AdiSpan { end, .. })) => *end,
+			None => 0,
+		};
+
+		let new_bbid = self.bbs.len();
+
+		self.bbs.push(TextBB {ea,
+			code: vec![("new".into(), "bb".into())],
+		});
+
+		self.insert(ea, AdiSpan {
+			seg: 0,
+			start: ea,
+			end: ea + 1,
+			kind: SpanKind::Code(new_bbid),
+		});
+
+		self.changes.borrow_mut().push_back(ListChange::Added { idx: ea });
 	}
 }
 
@@ -343,8 +378,7 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 		let ret = self.spans.insert(idx, val.clone());
 
 		match ret {
-			None =>
-				self.changes.borrow_mut().push_back(ListChange::Added { idx }),
+			None => self.changes.borrow_mut().push_back(ListChange::Added { idx }),
 			Some(ref old) if *old != val =>
 				self.changes.borrow_mut().push_back(ListChange::Changed { idx }),
 			_ => {}
@@ -387,7 +421,7 @@ impl CodePane {
 		let ui = container(sparse_list(
 			&self.seg,
 			|ea, span: &AdiSpan| {
-				println!("manifesting bb @ ea {:04X}", ea);
+				// println!("manifesting bb @ ea {:04X}", ea);
 
 				let SpanKind::Code(bbidx) = span.kind else { panic!() };
 				let bb = self.seg.get_bb(bbidx);
@@ -395,23 +429,27 @@ impl CodePane {
 				use CodeViewChangeKind::*;
 
 				container(column![
-					// row![
-					// 	button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
-					// 	iced::widget::space::Space::new().width(10),
-					// 	button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
-					// 	iced::widget::space::Space::new().width(10),
-					// 	button("modify").on_press(Message::CodeViewChange { ea, kind: Modify }),
-					// ],
+					row![
+						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
+						iced::widget::space::Space::new().width(10),
+						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
+						iced::widget::space::Space::new().width(10),
+						button("expand").on_press(Message::CodeViewChange { ea, kind: Expand }),
+						iced::widget::space::Space::new().width(10),
+						button("contract").on_press(Message::CodeViewChange { ea, kind: Contract }),
+					],
 					Rich::with_spans(bb.render())
 						.on_link_click(CodeLink::into_message)
 						.font(CONSOLAS_FONT.bold()),
-					// row![
-					// 	button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
-					// 	iced::widget::space::Space::new().width(10),
-					// 	button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
-					// 	iced::widget::space::Space::new().width(10),
-					// 	button("modify").on_press(Message::CodeViewChange { ea, kind: Modify }),
-					// ],
+					row![
+						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split }),
+						iced::widget::space::Space::new().width(10),
+						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete }),
+						iced::widget::space::Space::new().width(10),
+						button("expand").on_press(Message::CodeViewChange { ea, kind: Expand }),
+						iced::widget::space::Space::new().width(10),
+						button("contract").on_press(Message::CodeViewChange { ea, kind: Contract }),
+					],
 				])
 				.width(Length::Fill)
 				.style(move |_theme| {
@@ -441,11 +479,19 @@ impl CodePane {
 				println!("delete bb @ {:04X}", ea);
 				self.seg.remove(ea);
 			}
-			CodeViewChangeKind::Modify => {
-				println!("modify bb @ {:04X}", ea);
-				self.seg.modify(ea);
+			CodeViewChangeKind::Expand => {
+				println!("expand bb @ {:04X}", ea);
+				self.seg.expand(ea);
+			}
+			CodeViewChangeKind::Contract => {
+				println!("contract bb @ {:04X}", ea);
+				self.seg.contract(ea);
 			}
 		}
+	}
+
+	fn add(&mut self) {
+		self.seg.add();
 	}
 }
 
@@ -503,6 +549,10 @@ impl AdiFE {
 		Self { panes, name_pane, code_pane }
 	}
 
+	fn code_pane_mut(&mut self) -> &mut CodePane {
+		self.panes.get_mut(self.code_pane).unwrap().as_code_mut()
+	}
+
 	fn update(&mut self, message: Message) {
 		match message {
 			Message::PaneDragged(de) => {
@@ -516,7 +566,10 @@ impl AdiFE {
 			}
 
 			Message::CodeViewChange { ea, kind } => {
-				self.panes.get_mut(self.code_pane).unwrap().as_code_mut().change(ea, kind);
+				self.code_pane_mut().change(ea, kind);
+			}
+			Message::AddItem => {
+				self.code_pane_mut().add();
 			}
 		}
 	}
@@ -536,7 +589,8 @@ impl AdiFE {
 			.on_resize(10, Message::PaneResized)
 			.min_size(200),
 
-			space().height(50)
+			space().height(50),
+			button("add").on_press(Message::AddItem)
 		].into()
 	}
 }
