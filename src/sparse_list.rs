@@ -124,7 +124,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		view_item: impl Fn(usize, &'a T) -> Element<'a, Message, Theme, Renderer>
 			+ 'a,
 	) -> Self {
-		println!("--------------------------NEW LIST-----------------------------");
+		// println!("--------------------------NEW LIST-----------------------------");
 		Self {
 			id: None,
 			content,
@@ -178,7 +178,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			}
 		}
 
-		self.dump_visible_indexes();
+		// self.dump_visible_indexes();
 	}
 
 	/// recomputes all elements' y positions so they start at 0.0 and increase.
@@ -591,10 +591,11 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			self.remove_elements_below(state, new_view_bottom);
 		}
 
-		self.dump_visible_indexes();
+		// self.dump_visible_indexes();
 		delta
 	}
 
+	#[allow(unused)]
 	fn dump_visible_indexes(&self) {
 		print!("visible: [");
 
@@ -828,7 +829,6 @@ where
 					}
 
 					if let Some(delta) = state.scroll_by {
-						println!("REDRAW: scrolling by {}", delta);
 						let delta = self.try_scroll(state, renderer, bounds,
 							Vector::new(0.0, delta));
 						state.scroll_and_capture(delta, bounds, state.content_bounds, shell);
@@ -1126,10 +1126,10 @@ impl State {
 			let y = y.clamp(0.0, 1.0);
 
 			if y == 0.0 {
-				println!(":::::::::: scroll - State::snap_to(Top)");
+				// println!(":::::::::: scroll - State::snap_to(Top)");
 				self.new_position = Some(NewPosition::Top);
 			} else if y == 1.0 {
-				println!(":::::::::: scroll - State::snap_to(Bottom)");
+				// println!(":::::::::: scroll - State::snap_to(Bottom)");
 				self.new_position = Some(NewPosition::Bottom);
 			}
 		}
@@ -1138,13 +1138,13 @@ impl State {
 	fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
 		if let (Some(offset_y), Some(idx)) = (offset.x, offset.y) {
 			let idx = idx.to_bits() as usize;
-			println!(":::::::::: scroll - State::scroll_to({:04X}) {}", idx, offset_y);
+			// println!(":::::::::: scroll - State::scroll_to({:04X}) {}", idx, offset_y);
 			self.new_position = Some(NewPosition::Absolute { idx, offset_y });
 		}
 	}
 
 	fn scroll_by(&mut self, offset: f32) {
-		println!(":::::::::: scroll - State::scroll_by({})", offset);
+		// println!(":::::::::: scroll - State::scroll_by({})", offset);
 		self.scroll_by = Some(offset);
 	}
 
