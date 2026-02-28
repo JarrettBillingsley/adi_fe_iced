@@ -54,15 +54,11 @@ pub enum Change {
 /// The interface to the underlying content which you must implement for `SparseList` to be able to
 /// display your items.
 pub trait IContent<'a, V: 'a> {
-	/// how many items there are; always <= `domain()`
+	/// how many items there are
 	fn len(&self) -> usize;
 
 	/// true if `self.len() == 0`
 	fn is_empty(&self) -> bool { self.len() == 0 }
-
-	// // TODO: not needed?
-	// /// the valid domain of indexes `[0 .. domain)`, but not every index need be present
-	// fn domain(&self) -> usize;
 
 	/// return the first valid index, or `None` if there are no valid indices
 	fn first(&self) -> Option<usize>;
