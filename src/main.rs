@@ -363,11 +363,11 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 		self.spans.len()
 	}
 
-	fn first(&self) -> Option<usize> {
+	fn first_index(&self) -> Option<usize> {
 		self.spans.keys().copied().nth(0)
 	}
 
-	fn last(&self) -> Option<usize> {
+	fn last_index(&self) -> Option<usize> {
 		self.spans.keys().copied().nth_back(0)
 	}
 

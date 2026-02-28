@@ -61,10 +61,10 @@ pub trait IContent<'a, V: 'a> {
 	fn is_empty(&self) -> bool { self.len() == 0 }
 
 	/// return the first valid index, or `None` if there are no valid indices
-	fn first(&self) -> Option<usize>;
+	fn first_index(&self) -> Option<usize>;
 
 	/// return the last valid index, or `None` if there are no valid indices
-	fn last(&self) -> Option<usize>;
+	fn last_index(&self) -> Option<usize>;
 
 	/// get the item with the given index, if it exists
 	fn get(&self, idx: usize) -> Option<&V>;
@@ -449,8 +449,8 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			.expect("refresh without new_position")
 		{
 			// SAFETY: both unwrap()s okay because we asserted content is not empty at top
-			NewPosition::Top                        => (self.content.first().unwrap(), 0.0),
-			NewPosition::Bottom                     => (self.content.last().unwrap(), 0.0),
+			NewPosition::Top                        => (self.content.first_index().unwrap(), 0.0),
+			NewPosition::Bottom                     => (self.content.last_index().unwrap(), 0.0),
 			NewPosition::Absolute { idx, offset_y } => (idx, offset_y),
 		};
 
@@ -495,7 +495,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			// ran out of elements at the bottom; that means offset_y is not achievable.
 
 			// SAFETY: asserted content is not empty at start of function
-			if state.first_index() == self.content.first().unwrap() {
+			if state.first_index() == self.content.first_index().unwrap() {
 				// in this case, we're just out of elements!
 				// the desired scroll offset is forced to 0.
 				state.offset_y = 0.0;
@@ -620,14 +620,10 @@ where
 	}
 
 	fn state(&self) -> tree::State {
-		let new_position = match self.content.first() {
+		let new_position = match self.content.first_index() {
 			Some(idx) => Some(NewPosition::Absolute { idx, offset_y: 0.0 }),
 			None      => Some(NewPosition::Top),
 		};
-			// TODO: temporary
-			// self.content.last().map(|idx| NewPosition { idx, offset_y: 20.0 });
-			// self.content.items_after(self.content.first().unwrap())
-			// .nth(9).map(|(idx, _)| NewPosition { idx, offset_y: 10.0 });
 
 		tree::State::new(State {
 			last_limits:        layout::Limits::NONE,
