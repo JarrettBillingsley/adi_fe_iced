@@ -232,7 +232,6 @@ pub struct AdiSpan {
 }
 
 struct DummySegment {
-	// end: usize,
 	bbs: Vec<TextBB>,
 	spans: BTreeMap<usize, AdiSpan>,
 	changes: RefCell<Vec<ListChange>>,
@@ -242,7 +241,6 @@ impl DummySegment {
 	fn new() -> Self {
 		let bbs = dummy_code_data().to_vec();
 		Self {
-			// end: 0x10000,
 			spans: bbs.iter().enumerate().map(|(i, bb)| {
 				(bb.ea,
 				AdiSpan {

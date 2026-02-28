@@ -686,7 +686,7 @@ where
 
 		let last_offset_y = state.offset_y;
 
-		// 1. check if it's been long enough to stop scrolling or they moved the mouse or whatever
+		// check if it's been long enough to stop scrolling or they moved the mouse or whatever
 		if let Some(last_scrolled) = state.last_scrolled {
 			let clear_transaction = match event {
 				Event::Mouse(
