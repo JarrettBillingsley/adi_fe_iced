@@ -1,15 +1,15 @@
 #![allow(missing_docs)]
 // #![allow(unused)]
 
-///! Horrifying amalgamation of iced/list-widget-reloaded's List, and iced's Scrollable.
-///! Scrollable list of items which are dynamically instantiated, whose indexes are ordered but
-///! potentially sparse. Also supports jumping to top/bottom/arbitrary item indexes, but doesn't
-///! really have a concept of a "scroll position" the way a real Scrollable does. Scrolling is
-///! instead kind of always relative to the current position.
+//! Horrifying amalgamation of iced/list-widget-reloaded's List, and iced's Scrollable.
+//! Scrollable list of items which are dynamically instantiated, whose indexes are ordered but
+//! potentially sparse. Also supports jumping to top/bottom/arbitrary item indexes, but doesn't
+//! really have a concept of a "scroll position" the way a real Scrollable does. Scrolling is
+//! instead kind of always relative to the current position.
 
 use std::ops::{ Bound };
 use std::time::{ Instant, Duration };
-use std::collections::{ BTreeMap, VecDeque };
+use std::collections::{ BTreeMap };
 
 use iced_core::{
 	self, Clipboard, Element, Layout, Length, Point, Rectangle, Shell,
@@ -78,8 +78,8 @@ pub trait IContent<'a, V: 'a> {
 	fn items_after(&'a self, idx: usize)
 		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
 
-	/// get a mutable queue of changes which have occurred.
-	fn changes(&self) -> VecDeque<Change>;
+	/// get a vector of changes which have occurred.
+	fn changes(&self) -> Vec<Change>;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -145,12 +145,12 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 	// passing the element in and returning it seems silly but BORROW CHECKER REASONS (well,
 	// really, "lack of impl Borrow for &mut Element" reasons but same diff)
-	fn layout_element(&self, mut tree: &mut Tree, limits: &layout::Limits, renderer: &Renderer,
+	fn layout_element(&self, tree: &mut Tree, limits: &layout::Limits, renderer: &Renderer,
 		y: f32, mut element: Element<'a, Message, Theme, Renderer>)
 	-> (Element<'a, Message, Theme, Renderer>, layout::Node) {
 		let layout = element
 			.as_widget_mut()
-			.layout(&mut tree, renderer, &limits)
+			.layout(tree, renderer, limits)
 			.move_to((0.0, y));
 
 		(element, layout)
@@ -217,7 +217,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// add an element to the list. `y` is the Y position it should be placed at; `heightfn` is a
 	/// callback called with the height of the newly-created item, useful for updating state.
 	fn add_element(&mut self, state: &mut State, renderer: &Renderer, idx: usize, item: &'a T,
-	y: f32, mut heightfn: impl FnMut(f32) -> ()) {
+	y: f32, mut heightfn: impl FnMut(f32)) {
 		let element = self.new_element_with(idx, item);
 		let mut tree = Tree::new(&element);
 		let (element, layout) = self.layout_element(&mut tree, &state.limits_without_max_height(),
@@ -234,7 +234,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// remove an element from the list. `heightfn` is a callback called with the height of the
 	/// item about to be removed.
 	fn remove_element(&mut self, state: &mut State, idx: usize,
-	mut heightfn: impl FnMut(f32) -> ()) {
+	mut heightfn: impl FnMut(f32)) {
 		let height = state.height_of(idx);
 		// I'm paranoid about float arithmetic okay
 		state.content_bounds.height = (state.content_bounds.height - height).max(0.0);
@@ -323,9 +323,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn apply_changes(&mut self, state: &mut State, renderer: &Renderer) {
-		let mut changes = self.content.changes();
-
-		while let Some(change) = changes.pop_front() {
+		for change in self.content.changes() {
 			match change {
 				Change::Changed { idx } => self.item_changed(state, renderer, idx),
 				Change::Removed { idx } => self.item_removed(state, idx),
@@ -375,25 +373,24 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 				self.content.get(idx).expect("item_added on an item not in the content"),
 				0.0, |_|{});
 			state.changes_happened = true;
-		} else {
-			if self.is_between_visible(idx, state) {
-				// figure out which element it's after to know Y
-				let y = self.y_pos_of_new_item(idx, state);
-				// add it
-				self.add_element(state, renderer, idx,
-					self.content.get(idx).expect("item_added on an item not in the content"),
-					y, |_| {});
-				// shift everything after it down
-				self.recompute_element_y_positions_after(
-					state, idx, state.bottom_of(idx));
-			} else if self.is_right_after_visible(idx, state) {
-				// this case is possible when there aren't many items in the list, and the
-				// newly-added item is right after the last item.
+		} else if self.is_between_visible(idx, state) {
+			// figure out which element it's after to know Y
+			let y = self.y_pos_of_new_item(idx, state);
+			// add it
+			self.add_element(state, renderer, idx,
+				self.content.get(idx).expect("item_added on an item not in the content"),
+				y, |_| {});
+			// shift everything after it down
+			self.recompute_element_y_positions_after(
+				state, idx, state.bottom_of(idx));
+		} else if self.is_right_after_visible(idx, state) {
+			// this case is possible when there aren't many items in the list, and the
+			// newly-added item is right after the last item.
 
-				// don't have to add it here, it'll get added in update()
-				state.changes_happened = true;
-			}
+			// don't have to add it here, it'll get added in update()
+			state.changes_happened = true;
 		}
+		// else... do nothing.
 	}
 
 	fn y_pos_of_new_item(&self, new_idx: usize, state: &State) -> f32 {
@@ -464,7 +461,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 		// we need to first create the element from the item at initial_idx. its Y position doesn't
 		// matter because it gets recomputed by add_elements_before later.
 		self.add_element(state, renderer, initial_idx,
-			&self.content.get(initial_idx).expect("refresh on an item not in the content"),
+			self.content.get(initial_idx).expect("refresh on an item not in the content"),
 			0.0, |_|{});
 
 		// ------------------------------------------------------------
@@ -648,11 +645,11 @@ where
 
 	fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits)
 	-> layout::Node {
-		let mut state = tree.state.downcast_mut::<State>();
+		let state = tree.state.downcast_mut::<State>();
 		state.last_limits = limits.loose();
 
 		if !state.needs_refresh() && !self.elements_need_to_be_recreated(state) {
-			self.apply_changes(&mut state, renderer);
+			self.apply_changes(state, renderer);
 		}
 
 		layout::Node::new(limits.resolve(Length::Fill, Length::Fill, state.content_bounds.size()))
@@ -669,7 +666,7 @@ where
 		shell: &mut Shell<'_, Message>,
 		_viewport: &Rectangle,
 	) {
-		let mut state = tree.state.downcast_mut::<State>();
+		let state = tree.state.downcast_mut::<State>();
 
 		let bounds = layout.bounds();
 
@@ -812,7 +809,7 @@ where
 						self.recreate_elements(state);
 
 						// and apply any pending changes, now that everything is recreated.
-						self.apply_changes(&mut state, renderer);
+						self.apply_changes(state, renderer);
 					}
 
 					if state.changes_happened {

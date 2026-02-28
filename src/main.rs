@@ -1,5 +1,5 @@
 
-use std::collections::{ BTreeMap, VecDeque };
+use std::collections::{ BTreeMap };
 use std::ops::{ Bound };
 use std::cell::{ RefCell };
 
@@ -15,6 +15,10 @@ use rand::prelude::*;
 
 mod sparse_list;
 use sparse_list::{ sparse_list, IContent, Change as ListChange };
+
+// ------------------------------------------------------------------------------------------------
+// main
+// ------------------------------------------------------------------------------------------------
 
 fn main() -> iced::Result {
 	setup_panic();
@@ -139,11 +143,11 @@ impl TextBB {
 
 const NUM_CODE_SPANS: usize = 50;
 
-const MNEMONICS: &[&'static str] = &[
+const MNEMONICS: &[&str] = &[
 	"lda", "sta", "bpl", "jsr", "rts", "dex", "pha",
 ];
 
-const OPERANDS: &[&'static str] = &[
+const OPERANDS: &[&str] = &[
 	"#30", "[PPUSCROLL]", "[arr + X]", "label", "#$69",
 ];
 
@@ -171,7 +175,7 @@ fn dummy_code_data() -> &'static [TextBB] {
 		bbs
 	});
 
-	&*RET
+	&RET
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -231,7 +235,7 @@ struct DummySegment {
 	// end: usize,
 	bbs: Vec<TextBB>,
 	spans: BTreeMap<usize, AdiSpan>,
-	changes: RefCell<VecDeque<ListChange>>,
+	changes: RefCell<Vec<ListChange>>,
 }
 
 impl DummySegment {
@@ -249,7 +253,7 @@ impl DummySegment {
 				})
 			}).collect(),
 			bbs,
-			changes: RefCell::new(VecDeque::new()),
+			changes: RefCell::new(Vec::new()),
 		}
 	}
 
@@ -298,7 +302,7 @@ impl DummySegment {
 		let SpanKind::Code(bbidx) = span.kind else { panic!() };
 		let bb = &mut self.bbs[bbidx];
 		bb.code.push(("FUCK".into(), "123".into()));
-		self.changes.borrow_mut().push_back(ListChange::Changed { idx: ea });
+		self.changes.borrow_mut().push(ListChange::Changed { idx: ea });
 	}
 
 	fn contract(&mut self, ea: usize) {
@@ -308,7 +312,7 @@ impl DummySegment {
 
 		if bb.code.len() > 1 {
 			bb.code.pop();
-			self.changes.borrow_mut().push_back(ListChange::Changed { idx: ea });
+			self.changes.borrow_mut().push(ListChange::Changed { idx: ea });
 		}
 	}
 
@@ -331,16 +335,16 @@ impl DummySegment {
 			kind: SpanKind::Code(new_bbid),
 		});
 
-		self.changes.borrow_mut().push_back(ListChange::Added { idx: ea });
+		self.changes.borrow_mut().push(ListChange::Added { idx: ea });
 	}
 
 	fn insert(&mut self, idx: usize, val: AdiSpan) -> Option<AdiSpan> {
-		let ret = self.spans.insert(idx, val.clone());
+		let ret = self.spans.insert(idx, val);
 
 		match ret {
-			None => self.changes.borrow_mut().push_back(ListChange::Added { idx }),
+			None => self.changes.borrow_mut().push(ListChange::Added { idx }),
 			Some(ref old) if *old != val =>
-				self.changes.borrow_mut().push_back(ListChange::Changed { idx }),
+				self.changes.borrow_mut().push(ListChange::Changed { idx }),
 			_ => {}
 		}
 
@@ -351,7 +355,7 @@ impl DummySegment {
 		let ret = self.spans.remove(&idx).is_some();
 
 		if ret {
-			self.changes.borrow_mut().push_back(ListChange::Removed { idx });
+			self.changes.borrow_mut().push(ListChange::Removed { idx });
 		}
 
 		ret
@@ -377,9 +381,8 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 
 	fn items_before(&'a self, idx: usize)
 	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
-		let mut iter = self.spans.range(..= idx);
-		iter.next_back();
-		Box::new(iter.rev().map(|(idx, span)| (*idx, span)))
+		Box::new(self.spans.range((Bound::Unbounded, Bound::Excluded(idx)))
+			.rev().map(|(idx, span)| (*idx, span)))
 	}
 
 	fn items_after(&'a self, idx: usize)
@@ -388,7 +391,7 @@ impl<'a> IContent<'a, AdiSpan> for DummySegment {
 			.map(|(idx, span)| (*idx, span)))
 	}
 
-	fn changes(&self) -> VecDeque<ListChange> {
+	fn changes(&self) -> Vec<ListChange> {
 		self.changes.take()
 	}
 }
@@ -410,8 +413,6 @@ impl CodePane {
 		let list = sparse_list(
 			&self.seg,
 			|ea, span: &AdiSpan| {
-				// println!("manifesting bb @ ea {:04X}", ea);
-
 				let SpanKind::Code(bbidx) = span.kind else { panic!() };
 				let bb = self.seg.get_bb(bbidx);
 
@@ -470,19 +471,15 @@ impl CodePane {
 	fn change(&mut self, ea: usize, kind: CodeViewChangeKind) {
 		match kind {
 			CodeViewChangeKind::Split => {
-				println!("split bb @ {:04X}", ea);
 				self.seg.try_split(ea);
 			}
 			CodeViewChangeKind::Delete => {
-				println!("delete bb @ {:04X}", ea);
 				self.seg.remove(ea);
 			}
 			CodeViewChangeKind::Expand => {
-				println!("expand bb @ {:04X}", ea);
 				self.seg.expand(ea);
 			}
 			CodeViewChangeKind::Contract => {
-				println!("contract bb @ {:04X}", ea);
 				self.seg.contract(ea);
 			}
 		}
@@ -554,38 +551,33 @@ impl AdiFE {
 	fn update(&mut self, message: Message) -> Task<Message> {
 		match message {
 			Message::PaneDragged(de) => {
-				println!("dragged {:?}", de);
+				println!("TODO: dragged {:?}", de);
 			}
 			Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
 				self.panes.resize(split, ratio);
 			}
 			Message::OperandClicked { ea, opn } => {
-				println!("clicked operand {} of instruction at {:04X}", opn, ea);
+				println!("TODO: clicked operand {} of instruction at {:04X}", opn, ea);
 			}
 			Message::JumpTo { ea } => {
-				println!("jump to ea {:04X}", ea);
-				// self.code_pane_mut().jump_to(ea);
 				return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
 					y: Some(f32::from_bits(ea as u32)), // item index
 					x: Some(80.0),                      // pixel offset from top
 				});
 			}
 			Message::JumpToTop =>  {
-				println!("jump to top");
 				return operation::snap_to(CodePane::LIST_ID, RelativeOffset {
 					x: None,
 					y: Some(0.0),
 				});
 			}
 			Message::JumpToBottom =>  {
-				println!("jump to bottom");
 				return operation::snap_to(CodePane::LIST_ID, RelativeOffset {
 					x: None,
 					y: Some(1.0),
 				});
 			}
 			Message::Scroll { up } => {
-				println!("scroll {}", if up { "up" } else { "down" });
 				return operation::scroll_by(CodePane::LIST_ID, AbsoluteOffset {
 					x: 0.0,
 					y: if up { -20.0 } else { 20.0 },
