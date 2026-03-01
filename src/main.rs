@@ -1,24 +1,40 @@
 #![allow(unused)]
 
-use std::collections::{ BTreeMap };
-use std::ops::{ Bound };
 use std::cell::{ RefCell };
 use std::rc::{ Rc };
+use std::fmt::{ Display, Formatter, Result as FmtResult };
+use std::collections::{ BTreeMap };
 
-use iced::widget::text::{ Span as TextSpan };
-use iced::{ Element, Font, color, Length, Border, Padding, Task };
-use iced::font::{ Weight };
-use iced::widget::{ pane_grid, text, column, row, span, container, scrollable, text::Rich, button,
-	operation::{ self, AbsoluteOffset, RelativeOffset }, space };
+use iced::{
+	Element, Font, Length, Padding, Task, Color as IcedColor, color,
+	font::{ Weight },
+	widget::{
+		column, row, span, container, scrollable, button, space, pick_list,
 
-use adi::{ EA, Span, SegId, SpanKind, PrintStyle, Image };
+		pane_grid,
+		pane_grid::{
+			Pane,
+			Axis as PaneAxis,
+			Content as PaneContent,
+			DragEvent as PaneDragEvent,
+			ResizeEvent as PaneResizeEvent,
+			State as PaneState,
+			TitleBar as PaneTitleBar,
+		},
 
-use simplelog::*;
+		text,
+		text::{ Rich, Wrapping, Span as TextSpan },
+
+		operation::{ self, AbsoluteOffset, RelativeOffset },
+	},
+};
+
+use adi::{ EA, SegId, PrintStyle, Image };
+
+use simplelog::{ *, Color as SimpleLogColor };
 use log::*;
 use better_panic::{ Settings as PanicSettings, Verbosity as PanicVerbosity };
 use native_dialog::{ DialogBuilder };
-
-use rand::prelude::*;
 
 // ------------------------------------------------------------------------------------------------
 // Modules
@@ -47,9 +63,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn setup_logging(max_level: LevelFilter) -> Result<(), SetLoggerError> {
 	let log_config = ConfigBuilder::new()
-		.set_level_color(Level::Info, Some(simplelog::Color::Green))
-		.set_level_color(Level::Debug, Some(simplelog::Color::Cyan))
-		.set_level_color(Level::Trace, Some(simplelog::Color::White))
+		.set_level_color(Level::Info, Some(SimpleLogColor::Green))
+		.set_level_color(Level::Debug, Some(SimpleLogColor::Cyan))
+		.set_level_color(Level::Trace, Some(SimpleLogColor::White))
 		.set_time_level(LevelFilter::Off)
 		.set_thread_level(LevelFilter::Error)
 		.set_target_level(LevelFilter::Off)
@@ -94,10 +110,11 @@ impl FontEx for Font {
 
 #[derive(Debug, Clone, Copy)]
 enum Message {
-	PaneDragged(pane_grid::DragEvent),
-	PaneResized(pane_grid::ResizeEvent),
+	PaneDragged(PaneDragEvent),
+	PaneResized(PaneResizeEvent),
 	OperandClicked { bb_ea: EA, instn: usize, opn: usize },
 	JumpTo { ea: EA },
+	SwitchSegment { id: SegId },
 	JumpToTop,
 	JumpToBottom,
 	Scroll { up: bool },
@@ -179,7 +196,6 @@ fn color_of(style: impl Into<PrintStyleEx>) -> u32 {
 		Adi(Label)      => 0xA06000, // light brown
 		Adi(Operand(_)) => panic!("trying to get the color of an operand"),
 		Adi(_)          => todo!("a new PrintStyle was added!"),
-		_               => todo!("new PrintStyleEx was added!"),
 	}
 }
 
@@ -208,11 +224,10 @@ impl SpanRenderer {
 
 	fn make_span(&self, s: impl Into<String>, color: u32) -> TextSpan<'static, CodeLink> {
 		span(s.into())
-			.color(iced::Color::from_rgb8(
+			.color(IcedColor::from_rgb8(
 				((color >> 16) & 0xFF) as u8,
 				((color >> 8) & 0xFF) as u8,
-				(color & 0xFF) as u8)
-			)
+				(color & 0xFF) as u8))
 	}
 
 	fn push(&mut self, s: impl Into<String>, color: u32) -> &mut Self {
@@ -385,11 +400,12 @@ struct NamesPane {
 
 impl NamesPane {
 	fn new(backend: Rc<Backend>) -> Self {
-		// TODO: keep the backend and dynamically get names
+		// TODO: keep the backend and dynamically get names... need some kind of listener in adi
+		// to listen for name changes to do that
 		Self { names: backend.get_all_names() }
 	}
 
-	fn view(&self) -> (Element<'_, Message>, String) {
+	fn view(&self) -> PaneContent<'_, Message> {
 		let ui = scrollable(column(self.names.iter().map(|(ea, name)| {
 			button(text(name).font(CONSOLAS_FONT.bold()))
 				.style(button::text)
@@ -397,7 +413,9 @@ impl NamesPane {
 				.into()
 		})).width(Length::Fill).padding(Padding::from([0, 10])));
 
-		(ui.into(), "Names".into())
+		let title = text("Names").size(20).font(Font::DEFAULT.bold());
+		PaneContent::new(ui)
+			.title_bar(PaneTitleBar::new(title).padding(10))
 	}
 }
 
@@ -407,15 +425,15 @@ impl NamesPane {
 
 struct SegmentView {
 	backend: Rc<Backend>,
-	seg:     SegId,
+	id:      SegId,
 	changes: RefCell<Vec<ListChange>>,
 }
 
 impl SegmentView {
-	fn new(seg: SegId, backend: Rc<Backend>) -> Self {
+	fn new(id: SegId, backend: Rc<Backend>) -> Self {
 		Self {
 			backend,
-			seg,
+			id,
 			changes: RefCell::new(Vec::new()),
 		}
 	}
@@ -424,8 +442,8 @@ impl SegmentView {
 		self.backend.get_rendered_span(ea)
 	}
 
-	fn segid(&self) -> SegId {
-		self.seg
+	fn id(&self) -> SegId {
+		self.id
 	}
 
 	fn ea_after(&self, ea: EA) -> Option<EA> {
@@ -462,7 +480,7 @@ impl SegmentView {
 
 impl<'a> IContent<'a, EA> for SegmentView {
 	fn len(&self) -> usize {
-		self.backend.get_num_spans(self.seg)
+		self.backend.get_num_spans(self.id)
 	}
 
 	fn first_index(&self) -> Option<usize> {
@@ -471,21 +489,21 @@ impl<'a> IContent<'a, EA> for SegmentView {
 	}
 
 	fn last_index(&self) -> Option<usize> {
-		Some(self.backend.get_last_span_offset(self.seg))
+		Some(self.backend.get_last_span_offset(self.id))
 	}
 
 	fn get(&self, idx: usize) -> Option<EA> {
-		Some(self.backend.get_span(EA::new(self.seg, idx)).start())
+		Some(self.backend.get_span(EA::new(self.id, idx)).start())
 	}
 
 	fn items_before(&'a self, idx: usize)
 	-> Box<dyn Iterator<Item = (usize, EA)> + 'a> {
-		Box::new(SpansBefore { seg: self, ea: EA::new(self.seg, idx) })
+		Box::new(SpansBefore { seg: self, ea: EA::new(self.id, idx) })
 	}
 
 	fn items_after(&'a self, idx: usize)
 	-> Box<dyn Iterator<Item = (usize, EA)> + 'a> {
-		Box::new(SpansAfter { seg: self, ea: EA::new(self.seg, idx) })
+		Box::new(SpansAfter { seg: self, ea: EA::new(self.id, idx) })
 	}
 
 	// TODO: changes!!!!!
@@ -531,30 +549,33 @@ impl<'a> Iterator for SpansBefore<'a> {
 // ------------------------------------------------------------------------------------------------
 
 struct CodePane {
-	seg: SegmentView,
+	seg:     SegmentView,
+	backend: Rc<Backend>,
 }
 
 impl CodePane {
+	// TODO: generate unique ID instead (could have multiple code panes open at once)
 	const LIST_ID: &str = "panes.code.list";
 
-	fn new(seg: SegId, backend: Rc<Backend>) -> Self {
+	fn new(id: SegId, backend: Rc<Backend>) -> Self {
 		Self {
-			seg: SegmentView::new(seg, backend),
+			seg: SegmentView::new(id, backend.clone()),
+			backend,
 		}
 	}
 
-	fn set_segment(&mut self, seg: SegId) {
-		self.seg = SegmentView::new(seg, self.seg.backend.clone());
+	fn set_segment(&mut self, id: SegId) {
+		self.seg = SegmentView::new(id, self.seg.backend.clone());
 	}
 
-	fn view(&self) -> (Element<'_, Message>, String) {
+	fn view(&self) -> PaneContent<'_, Message> {
 		let list = sparse_list(
 			&self.seg,
 			|_, ea: EA| {
 				container(Rich::with_spans(self.seg.render_span(ea).render())
 					.on_link_click(CodeLink::into_message)
 					.font(CONSOLAS_FONT.bold())
-					.wrapping(iced::widget::text::Wrapping::None)
+					.wrapping(Wrapping::None)
 				)
 				.width(Length::Fill)
 				// .style(move |_theme| {
@@ -572,45 +593,61 @@ impl CodePane {
 			container::Style::default().background(color!(0x101010))
 		});
 
-		(ui.into(), "Code".into())
+		let mut all_segs = self.backend.get_all_segments();
+		all_segs.sort_by_key(|data| data.segid);
+		// SAFETY: self.seg could only have been made from a valid segment ID
+		let this_seg = all_segs.iter().find(|data| data.segid == self.seg.id()).unwrap().clone();
+
+		let seg_selector = pick_list(
+			all_segs,
+			Some(this_seg),
+			|segdata| Message::SwitchSegment { id: segdata.segid });
+
+		PaneContent::new(ui)
+		.title_bar(
+			PaneTitleBar::new(text("Code").size(20).font(Font::DEFAULT.bold()))
+				.padding(10)
+				.controls(pane_grid::Controls::new(seg_selector))
+				.always_show_controls()
+		)
 	}
 }
 
 // ------------------------------------------------------------------------------------------------
-// PaneState
+// PaneKind
 // ------------------------------------------------------------------------------------------------
 
-enum PaneState {
+enum PaneKind {
 	Names(NamesPane),
 	Code(CodePane),
 }
 
-impl PaneState {
+impl PaneKind {
 	fn new_names(backend: Rc<Backend>) -> Self {
 		Self::Names(NamesPane::new(backend))
 	}
 
-	fn new_code(seg: SegId, backend: Rc<Backend>) -> Self {
-		Self::Code(CodePane::new(seg, backend))
+	fn new_code(id: SegId, backend: Rc<Backend>) -> Self {
+		Self::Code(CodePane::new(id, backend))
 	}
 
-	fn view(&self) -> (Element<'_, Message>, String) {
+	fn view(&self) -> PaneContent<'_, Message> {
 		match self {
-			PaneState::Names(n) => n.view(),
-			PaneState::Code(c)  => c.view(),
+			PaneKind::Names(n) => n.view(),
+			PaneKind::Code(c)  => c.view(),
 		}
 	}
 
 	fn as_code(&self) -> &CodePane {
 		match self {
-			PaneState::Code(c) => c,
+			PaneKind::Code(c) => c,
 			_ => panic!(),
 		}
 	}
 
 	fn as_code_mut(&mut self) -> &mut CodePane {
 		match self {
-			PaneState::Code(c) => c,
+			PaneKind::Code(c) => c,
 			_ => panic!(),
 		}
 	}
@@ -674,10 +711,9 @@ fn create_backend() -> Rc<Backend> {
 
 struct AdiFE {
 	backend: Rc<Backend>,
-	panes: pane_grid::State<PaneState>,
-	#[allow(dead_code)]
-	name_pane: pane_grid::Pane,
-	code_pane: pane_grid::Pane,
+	panes: PaneState<PaneKind>,
+	name_pane: Pane,
+	code_pane: Pane,
 }
 
 impl AdiFE {
@@ -686,9 +722,9 @@ impl AdiFE {
 	}
 
 	fn new(backend: Rc<Backend>) -> Self {
-		let (mut panes, name_pane) = pane_grid::State::new(PaneState::new_names(backend.clone()));
+		let (mut panes, name_pane) = PaneState::new(PaneKind::new_names(backend.clone()));
 		let (code_pane, split) = panes.split(
-			pane_grid::Axis::Vertical, name_pane, PaneState::new_code(
+			PaneAxis::Vertical, name_pane, PaneKind::new_code(
 				SegId(3), // TODO: temporary
 				backend.clone())).unwrap();
 		panes.resize(split, 0.2);
@@ -705,11 +741,13 @@ impl AdiFE {
 	}
 
 	fn update(&mut self, message: Message) -> Task<Message> {
+		// TODO: backend.pending_events()!
+
 		match message {
 			Message::PaneDragged(de) => {
 				println!("TODO: dragged {:?}", de);
 			}
-			Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
+			Message::PaneResized(PaneResizeEvent { split, ratio }) => {
 				self.panes.resize(split, ratio);
 			}
 			Message::OperandClicked { bb_ea, instn, opn } => {
@@ -719,13 +757,25 @@ impl AdiFE {
 			Message::JumpTo { ea } => {
 				let code_pane = self.code_pane_mut();
 
-				if code_pane.seg.segid() != ea.seg() {
+				if code_pane.seg.id() != ea.seg() {
 					code_pane.set_segment(ea.seg());
 				}
 
 				return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
 					y: Some(f32::from_bits(ea.offs() as u32)), // item index
 					x: Some(80.0),                             // pixel offset from top
+				});
+			}
+			Message::SwitchSegment { id } => {
+				let code_pane = self.code_pane_mut();
+
+				if code_pane.seg.id() != id {
+					code_pane.set_segment(id);
+				}
+
+				return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
+					y: Some(f32::from_bits(0u32)), // item index
+					x: Some(0.0),                  // pixel offset from top
 				});
 			}
 			Message::JumpToTop =>  {
@@ -756,11 +806,7 @@ impl AdiFE {
 			// trying to extract this callback into its own method is an exercise in frustration.
 			// just leave it here unless you want to have the Worst Types and Where Clauses Ever.
 			pane_grid(&self.panes, |_pane, state, _is_maximized| {
-				let (content, title) = state.view();
-				let title = text(title).size(20).font(Font::DEFAULT.bold());
-
-				pane_grid::Content::new(content)
-					.title_bar(pane_grid::TitleBar::new(title).padding(10))
+				state.view()
 			})
 			.on_drag(Message::PaneDragged)
 			.on_resize(10, Message::PaneResized)

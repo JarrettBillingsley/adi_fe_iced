@@ -12,7 +12,6 @@ adi           = { path = "../adi" }
 oneshot       = "0.1.13"
 native-dialog = "0.9.6"
 better-panic  = "0.2.0"
-rand          = "0.10.0"
 
 [profile.profiling]
 inherits = "release"

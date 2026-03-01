@@ -1,5 +1,7 @@
 #![allow(unused)]
 
+use std::fmt::{ Display, Formatter, Result as FmtResult };
+
 use adi::{ EA, SegId, PrintStyle };
 
 // ------------------------------------------------------------------------------------------------
@@ -30,11 +32,17 @@ pub struct NameListData {
 }
 
 /// Data for one segment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentData {
 	pub segid:    SegId,
 	pub name:     String,
 	pub is_image: bool,
+}
+
+impl Display for SegmentData {
+	fn fmt(&self, f: &mut Formatter) -> FmtResult {
+		write!(f, "{}", self.name)
+	}
 }
 
 /// Data for a single instruction operand, with an optional operand number.
