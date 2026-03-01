@@ -4,7 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iced = "0.14.0"
-iced_core = "0.14.0"
-rand = "0.10.0"
-better-panic = "0.2.0"
+iced          = "0.14.0"
+iced_core     = "0.14.0"
+log           = "0.4.11"
+simplelog     = "0.12.2"
+adi           = { path = "../adi" }
+oneshot       = "0.1.13"
+native-dialog = "0.9.6"
+better-panic  = "0.2.0"
+rand          = "0.10.0"
+
+[profile.profiling]
+inherits = "release"
+debug = true

@@ -1,30 +1,63 @@
+#![allow(unused)]
 
 use std::collections::{ BTreeMap };
 use std::ops::{ Bound };
 use std::cell::{ RefCell };
+use std::rc::{ Rc };
 
-use iced::widget::text::{ Span };
+use iced::widget::text::{ Span as TextSpan };
 use iced::{ Element, Font, color, Length, Border, Padding, Task };
 use iced::font::{ Weight };
 use iced::widget::{ pane_grid, text, column, row, span, container, scrollable, text::Rich, button,
 	operation::{ self, AbsoluteOffset, RelativeOffset }, space };
 
+use adi::{ EA, Span, SegId, SpanKind };
+
+use simplelog::*;
+use log::*;
 use better_panic::{ Settings as PanicSettings, Verbosity as PanicVerbosity };
+use native_dialog::{ DialogBuilder };
 
 use rand::prelude::*;
 
+// ------------------------------------------------------------------------------------------------
+// Modules
+// ------------------------------------------------------------------------------------------------
+
+mod backend;
 mod sparse_list;
+mod ui;
+
+use backend::{ Backend, BackendEvent, SegmentChangedEvent };
 use sparse_list::{ sparse_list, IContent, Change as ListChange };
+use ui::*;
 
 // ------------------------------------------------------------------------------------------------
 // main
 // ------------------------------------------------------------------------------------------------
 
-fn main() -> iced::Result {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+	setup_logging(LevelFilter::Debug)?;
 	setup_panic();
-	iced::application(AdiFE::default, AdiFE::update, AdiFE::view)
+	iced::application(AdiFE::init, AdiFE::update, AdiFE::view)
 		.font(CONSOLAS_BYTES)
-		.run()
+		.run()?;
+	Ok(())
+}
+
+fn setup_logging(max_level: LevelFilter) -> Result<(), SetLoggerError> {
+	let log_config = ConfigBuilder::new()
+		.set_level_color(Level::Info, Some(simplelog::Color::Green))
+		.set_level_color(Level::Debug, Some(simplelog::Color::Cyan))
+		.set_level_color(Level::Trace, Some(simplelog::Color::White))
+		.set_time_level(LevelFilter::Off)
+		.set_thread_level(LevelFilter::Error)
+		.set_target_level(LevelFilter::Off)
+		.set_location_level(LevelFilter::Off)
+		.set_level_padding(LevelPadding::Right)
+		.add_filter_allow_str("adi_fe_iced")
+		.build();
+	TermLogger::init(max_level, log_config, TerminalMode::Mixed, ColorChoice::Always)
 }
 
 fn setup_panic() {
@@ -60,25 +93,14 @@ impl FontEx for Font {
 // ------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
-enum CodeViewChangeKind {
-	Split,
-	Delete,
-	Expand,
-	Contract,
-}
-
-#[derive(Debug, Clone, Copy)]
 enum Message {
 	PaneDragged(pane_grid::DragEvent),
 	PaneResized(pane_grid::ResizeEvent),
-	OperandClicked { ea: usize, opn: usize },
-	JumpTo { ea: usize },
+	OperandClicked { bb_ea: EA, instn: usize, opn: usize },
+	JumpTo { ea: EA },
 	JumpToTop,
 	JumpToBottom,
 	Scroll { up: bool },
-
-	CodeViewChange { ea: usize, kind: CodeViewChangeKind },
-	AddItem,
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -87,95 +109,125 @@ enum Message {
 
 #[derive(Debug, Copy, Clone)]
 enum CodeLink {
-	Operand { ea: usize, opn: usize },
+	Operand { bb_ea: EA, instn: usize, opn: usize },
 }
 
 impl CodeLink {
 	fn into_message(self) -> Message {
 		match self {
-			CodeLink::Operand { ea, opn } => {
-				Message::OperandClicked { ea, opn }
+			CodeLink::Operand { bb_ea, instn, opn } => {
+				Message::OperandClicked { bb_ea, instn, opn }
 			}
 		}
 	}
 }
 
 // ------------------------------------------------------------------------------------------------
-// TextBB
+// Rendering to TextSpans
 // ------------------------------------------------------------------------------------------------
 
-#[derive(Clone, PartialEq, Eq)]
-struct TextBB {
-	ea: usize,
-	code: Vec<(String, String)> // mnemonic, operand
-}
+// TODO: have the backend render directly to text::Span (it is Send).
+impl BasicBlockData {
+	fn render(&self) -> Vec<TextSpan<'static, CodeLink>> {
+		let mut spans = Vec::new();
 
-impl TextBB {
-	fn label(&self) -> String {
-		format!("PRG0_loc_{:04X}", self.ea)
-	}
+		// TODO: inrefs
+		// TODO: MMU state
 
-	fn render(&self) -> Vec<Span<'_, CodeLink>> {
-		let mut spans: Vec<iced::widget::text::Span<'_, CodeLink, Font>> =
-			Vec::with_capacity(5 * (self.code.len() + 1));
-		spans.push(span(self.label()).color(color!(0xA06000)));
-		spans.push(span(":\n").color(color!(0xFFFFFF)));
+		// function name, attrs, entry points
+		if !self.func.name.is_empty() {
+			spans.push(span(
+				"; ------------------------------------------------------------------------------\n"
+				.to_string()).color(color!(0x00AF00)));
 
-		for (i, (mnemonic, operands)) in self.code.iter().enumerate() {
-			spans.push(span("    "));
-			spans.push(span(mnemonic).color(color!(0xFF0000)));
+			if self.func.is_piece {
+				spans.push(span(format!("; (Piece of function {})\n", self.func.name))
+					.color(color!(0x00AF00)));
+			} else {
+				spans.push(span(format!("; Function {}\n", self.func.name))
+					.color(color!(0x00AF00)));
+
+				if !self.func.attrs.is_empty() {
+					spans.push(span(format!("; Attributes: {}\n", self.func.attrs))
+						.color(color!(0x00AF00)));
+				}
+
+				if !self.func.entrypoints.is_empty() {
+					spans.push(span(format!("; Entry points: {}\n", self.func.entrypoints))
+						.color(color!(0x00AF00)));
+				}
+			}
+		}
+
+		// label
+		if !self.label.is_empty() {
+			spans.push(span(format!("                   {}", self.label.clone()))
+				.color(color!(0xA06000)));
+			spans.push(span(":\n").color(color!(0xFFFFFF)));
+		}
+
+		// lines of code
+		for (i, line) in self.lines.iter().enumerate() {
+			// seg:offs
+			spans.push(span(line.ea.seg.clone()).color(color!(0xFFFF00)));
+			spans.push(span(":").color(color!(0xFFFFFF)));
+			spans.push(span(line.ea.offs.clone()).color(color!(0xFFFFFF)));
+
+			// bytes
+			spans.push(span(format!(" {:8}     ", line.bytes)).color(color!(0x8080FF)));
+
+			// mnemonic
+			spans.push(span(line.mnemonic.clone()).color(color!(0xFF0000)));
 			spans.push(span(" "));
-			spans.push(
-				span(operands)
-				.color(color!(0xFFFFFF))
-				.link(CodeLink::Operand { ea: self.ea + i, opn: 0 })
-			);
+
+			// operands
+			for op in line.operands.iter() {
+				let mut span = span(op.text.clone()).color(op.color);
+
+				if let Some(opn) = op.opn {
+					span = span.link(CodeLink::Operand {
+						bb_ea: self.ea, instn: i, opn: opn.into() })
+				}
+
+				spans.push(span);
+			}
+
 			spans.push(span("\n"));
 		}
 
+		spans.push(span("\n"));
 		spans
 	}
 }
 
-// ------------------------------------------------------------------------------------------------
-// Dummy code data
-// ------------------------------------------------------------------------------------------------
+impl UnknownData {
+	fn render(&self) -> Vec<TextSpan<'static, CodeLink>> {
+		let mut spans = Vec::new();
 
-const NUM_CODE_SPANS: usize = 50;
+		for line in self.lines.iter() {
+			// seg:offs
+			spans.push(span(line.ea.seg.clone()).color(color!(0xFFFF00)));
+			spans.push(span(":").color(color!(0xFFFFFF)));
+			spans.push(span(line.ea.offs.clone()).color(color!(0xFFFFFF)));
 
-const MNEMONICS: &[&str] = &[
-	"lda", "sta", "bpl", "jsr", "rts", "dex", "pha",
-];
-
-const OPERANDS: &[&str] = &[
-	"#30", "[PPUSCROLL]", "[arr + X]", "label", "#$69",
-];
-
-fn dummy_code_data() -> &'static [TextBB] {
-	use std::sync::LazyLock;
-	static RET: LazyLock<Vec<TextBB>> = LazyLock::new(|| {
-		let mut bbs = vec![];
-		let mut ea = 0;
-		let mut rng = rand::rng();
-
-		for _ in 0 .. NUM_CODE_SPANS {
-			let len = rng.random_range(1 ..= 10);
-
-			bbs.push(TextBB {
-				ea,
-				code: (0 .. len).map(|_| (
-					(*MNEMONICS.choose(&mut rng).unwrap()).into(),
-					(*OPERANDS.choose(&mut rng).unwrap()).into()
-				)).collect()
-			});
-
-			ea += len;
+			// bytes
+			spans.push(span(format!(" {}\n", line.bytes)).color(color!(0xFF7F00)));
 		}
 
-		bbs
-	});
+		spans.push(span("\n"));
+		spans
+	}
+}
 
-	&RET
+impl CodeViewItem {
+	fn render(&self) -> Vec<TextSpan<'static, CodeLink>> {
+		match self {
+			CodeViewItem::BasicBlock(bb) => bb.render(),
+			CodeViewItem::DataItem =>
+				vec![span("AAAAAAAA DATA UNIMPLEMENTED").color(color!(0xFF0000))],
+			CodeViewItem::Unknown(unk) => unk.render(),
+		}
+	}
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -183,19 +235,13 @@ fn dummy_code_data() -> &'static [TextBB] {
 // ------------------------------------------------------------------------------------------------
 
 struct NamesPane {
-	names: Vec<(usize, String)>,
+	names: Vec<(EA, String)>,
 }
 
 impl NamesPane {
-	fn new() -> Self {
-		let bbs = dummy_code_data();
-		let mut names = Vec::with_capacity(bbs.len());
-
-		for bb in bbs.iter() {
-			names.push((bb.ea, bb.label()));
-		}
-
-		Self { names }
+	fn new(backend: Rc<Backend>) -> Self {
+		// TODO: keep the backend and dynamically get names
+		Self { names: backend.get_all_names() }
 	}
 
 	fn view(&self) -> (Element<'_, Message>, String) {
@@ -211,247 +257,163 @@ impl NamesPane {
 }
 
 // ------------------------------------------------------------------------------------------------
-// CodePane
+// SegmentView
 // ------------------------------------------------------------------------------------------------
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum SpanKind {
-	Unk,
-	Code(usize),
-	Data,
-	Ana,
-	AnaCode,
-}
-
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub struct AdiSpan {
-	seg:   u16,
-	start: usize,
-	end:   usize,
-	kind:  SpanKind,
-}
-
-struct DummySegment {
-	bbs: Vec<TextBB>,
-	spans: BTreeMap<usize, AdiSpan>,
+struct SegmentView {
+	backend: Rc<Backend>,
+	seg:     SegId,
 	changes: RefCell<Vec<ListChange>>,
 }
 
-impl DummySegment {
-	fn new() -> Self {
-		let bbs = dummy_code_data().to_vec();
+impl SegmentView {
+	fn new(seg: SegId, backend: Rc<Backend>) -> Self {
 		Self {
-			spans: bbs.iter().enumerate().map(|(i, bb)| {
-				(bb.ea,
-				AdiSpan {
-					seg: 0,
-					start: bb.ea,
-					end: bb.ea + bb.code.len(),
-					kind: SpanKind::Code(i),
-				})
-			}).collect(),
-			bbs,
+			backend,
+			seg,
 			changes: RefCell::new(Vec::new()),
 		}
 	}
 
-	fn get_bb(&self, bbidx: usize) -> &TextBB {
-		&self.bbs[bbidx]
+	fn render_span(&self, ea: EA) -> CodeViewItem {
+		self.backend.get_rendered_span(ea)
 	}
 
-	fn try_split(&mut self, old_ea: usize) {
-		let old_span = self.spans.get(&old_ea).unwrap();
-		let SpanKind::Code(bbidx) = old_span.kind else { panic!() };
-		let old_bb = &mut self.bbs[bbidx];
-		let cur_len = old_bb.code.len();
-
-		if cur_len >= 2 {
-			let old_len = cur_len / 2;
-			let new_len = cur_len - old_len;
-			let new_code = old_bb.code.split_off(old_len);
-			assert!(new_code.len() == new_len);
-
-			let new_ea = old_ea + old_len;
-			let new_bbid = self.bbs.len();
-
-			self.bbs.push(TextBB {
-				ea: new_ea,
-				code: new_code
-			});
-
-			self.insert(old_ea, AdiSpan {
-				seg: 0,
-				start: old_ea,
-				end: old_ea + old_len,
-				kind: old_span.kind,
-			});
-
-			self.insert(new_ea, AdiSpan {
-				seg: 0,
-				start: new_ea,
-				end: new_ea + new_len,
-				kind: SpanKind::Code(new_bbid),
-			});
-		}
+	fn segid(&self) -> SegId {
+		self.seg
 	}
 
-	fn expand(&mut self, ea: usize) {
-		let span = self.spans.get(&ea).unwrap();
-		let SpanKind::Code(bbidx) = span.kind else { panic!() };
-		let bb = &mut self.bbs[bbidx];
-		bb.code.push(("FUCK".into(), "123".into()));
-		self.changes.borrow_mut().push(ListChange::Changed { idx: ea });
+	fn ea_after(&self, ea: EA) -> Option<EA> {
+		self.backend.get_span_after(ea).map(|span| span.start())
 	}
 
-	fn contract(&mut self, ea: usize) {
-		let span = self.spans.get(&ea).unwrap();
-		let SpanKind::Code(bbidx) = span.kind else { panic!() };
-		let bb = &mut self.bbs[bbidx];
-
-		if bb.code.len() > 1 {
-			bb.code.pop();
-			self.changes.borrow_mut().push(ListChange::Changed { idx: ea });
-		}
+	fn ea_before(&self, ea: EA) -> Option<EA> {
+		self.backend.get_span_before(ea).map(|span| span.start())
 	}
 
-	fn add(&mut self) {
-		let ea = match self.spans.last_key_value() {
-			Some((_, AdiSpan { end, .. })) => *end,
-			None => 0,
-		};
+	// fn insert(&mut self, idx: usize, val: Span) -> Option<Span> {
+	// 	let ret = self.spans.insert(idx, val);
 
-		let new_bbid = self.bbs.len();
+	// 	match ret {
+	// 		None => self.changes.borrow_mut().push(ListChange::Added { idx }),
+	// 		Some(ref old) if *old != val =>
+	// 			self.changes.borrow_mut().push(ListChange::Changed { idx }),
+	// 		_ => {}
+	// 	}
 
-		self.bbs.push(TextBB {ea,
-			code: vec![("new".into(), "bb".into())],
-		});
+	// 	ret
+	// }
 
-		self.insert(ea, AdiSpan {
-			seg: 0,
-			start: ea,
-			end: ea + 1,
-			kind: SpanKind::Code(new_bbid),
-		});
+	// fn remove(&mut self, idx: usize) -> bool {
+	// 	let ret = self.spans.remove(&idx).is_some();
 
-		self.changes.borrow_mut().push(ListChange::Added { idx: ea });
-	}
+	// 	if ret {
+	// 		self.changes.borrow_mut().push(ListChange::Removed { idx });
+	// 	}
 
-	fn insert(&mut self, idx: usize, val: AdiSpan) -> Option<AdiSpan> {
-		let ret = self.spans.insert(idx, val);
-
-		match ret {
-			None => self.changes.borrow_mut().push(ListChange::Added { idx }),
-			Some(ref old) if *old != val =>
-				self.changes.borrow_mut().push(ListChange::Changed { idx }),
-			_ => {}
-		}
-
-		ret
-	}
-
-	fn remove(&mut self, idx: usize) -> bool {
-		let ret = self.spans.remove(&idx).is_some();
-
-		if ret {
-			self.changes.borrow_mut().push(ListChange::Removed { idx });
-		}
-
-		ret
-	}
+	// 	ret
+	// }
 }
 
-impl<'a> IContent<'a, AdiSpan> for DummySegment {
+impl<'a> IContent<'a, EA> for SegmentView {
 	fn len(&self) -> usize {
-		self.spans.len()
+		self.backend.get_num_spans(self.seg)
 	}
 
 	fn first_index(&self) -> Option<usize> {
-		self.spans.keys().copied().nth(0)
+		// by definition
+		Some(0)
 	}
 
 	fn last_index(&self) -> Option<usize> {
-		self.spans.keys().copied().nth_back(0)
+		Some(self.backend.get_last_span_offset(self.seg))
 	}
 
-	fn get(&self, idx: usize) -> Option<&AdiSpan> {
-		self.spans.get(&idx)
+	fn get(&self, idx: usize) -> Option<EA> {
+		Some(self.backend.get_span(EA::new(self.seg, idx)).start())
 	}
 
 	fn items_before(&'a self, idx: usize)
-	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
-		Box::new(self.spans.range((Bound::Unbounded, Bound::Excluded(idx)))
-			.rev().map(|(idx, span)| (*idx, span)))
+	-> Box<dyn Iterator<Item = (usize, EA)> + 'a> {
+		Box::new(SpansBefore { seg: self, ea: EA::new(self.seg, idx) })
 	}
 
 	fn items_after(&'a self, idx: usize)
-	-> Box<dyn DoubleEndedIterator<Item = (usize, &'a AdiSpan)> + 'a> {
-		Box::new(self.spans.range((Bound::Excluded(idx), Bound::Unbounded))
-			.map(|(idx, span)| (*idx, span)))
+	-> Box<dyn Iterator<Item = (usize, EA)> + 'a> {
+		Box::new(SpansAfter { seg: self, ea: EA::new(self.seg, idx) })
 	}
 
+	// TODO: changes!!!!!
 	fn changes(&self) -> Vec<ListChange> {
 		self.changes.take()
 	}
 }
 
+struct SpansAfter<'a> {
+	seg: &'a SegmentView,
+	ea:  EA,
+}
+
+impl<'a> Iterator for SpansAfter<'a> {
+	type Item = (usize, EA);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		self.seg.ea_after(self.ea).map(|next_ea| {
+			self.ea = next_ea;
+			(next_ea.offs(), next_ea)
+		})
+	}
+}
+
+struct SpansBefore<'a> {
+	seg: &'a SegmentView,
+	ea:  EA,
+}
+
+impl<'a> Iterator for SpansBefore<'a> {
+	type Item = (usize, EA);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		self.seg.ea_before(self.ea).map(|next_ea| {
+			self.ea = next_ea;
+			(next_ea.offs(), next_ea)
+		})
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// CodePane
+// ------------------------------------------------------------------------------------------------
+
 struct CodePane {
-	seg: DummySegment,
+	seg: SegmentView,
 }
 
 impl CodePane {
 	const LIST_ID: &str = "panes.code.list";
 
-	fn new() -> Self {
+	fn new(seg: SegId, backend: Rc<Backend>) -> Self {
 		Self {
-			seg: DummySegment::new(),
+			seg: SegmentView::new(seg, backend),
 		}
 	}
 
 	fn view(&self) -> (Element<'_, Message>, String) {
 		let list = sparse_list(
 			&self.seg,
-			|ea, span: &AdiSpan| {
-				let SpanKind::Code(bbidx) = span.kind else { panic!() };
-				let bb = self.seg.get_bb(bbidx);
+			|_, ea: EA| {
+				let rendered = self.seg.render_span(ea);
+				let rendered = rendered.render();
 
-				use CodeViewChangeKind::*;
-
-				container(column![
-					row![
-						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split })
-							.padding(0).style(button::danger),
-						space().width(10),
-						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete })
-							.padding(0).style(button::danger),
-						space().width(10),
-						button("expand").on_press(Message::CodeViewChange { ea, kind: Expand })
-							.padding(0).style(button::danger),
-						space().width(10),
-						button("contract").on_press(Message::CodeViewChange { ea, kind: Contract })
-							.padding(0).style(button::danger),
-					],
-					Rich::with_spans(bb.render())
-						.on_link_click(CodeLink::into_message)
-						.font(CONSOLAS_FONT.bold()),
-					row![
-						button("split" ).on_press(Message::CodeViewChange { ea, kind: Split })
-							.padding(0).style(button::danger),
-						space().width(10),
-						button("delete").on_press(Message::CodeViewChange { ea, kind: Delete })
-							.padding(0).style(button::danger),
-						space().width(10),
-						button("expand").on_press(Message::CodeViewChange { ea, kind: Expand })
-							.padding(0).style(button::danger),
-						space().width(10),
-						button("contract").on_press(Message::CodeViewChange { ea, kind: Contract })
-							.padding(0).style(button::danger),
-					],
-				])
+				container(Rich::with_spans(rendered)
+					.on_link_click(CodeLink::into_message)
+					.font(CONSOLAS_FONT.bold())
+				)
 				.width(Length::Fill)
-				.style(move |_theme| {
-					container::Style::default().border(
-						Border::default().color(color!(0xFFFFFF)).width(0.3))
-				})
+				// .style(move |_theme| {
+				// 	container::Style::default().border(
+				// 		Border::default().color(color!(0xFFFFFF)).width(0.3))
+				// })
 				.into()
 			}).id(Self::LIST_ID);
 
@@ -465,27 +427,6 @@ impl CodePane {
 
 		(ui.into(), "Code".into())
 	}
-
-	fn change(&mut self, ea: usize, kind: CodeViewChangeKind) {
-		match kind {
-			CodeViewChangeKind::Split => {
-				self.seg.try_split(ea);
-			}
-			CodeViewChangeKind::Delete => {
-				self.seg.remove(ea);
-			}
-			CodeViewChangeKind::Expand => {
-				self.seg.expand(ea);
-			}
-			CodeViewChangeKind::Contract => {
-				self.seg.contract(ea);
-			}
-		}
-	}
-
-	fn add(&mut self) {
-		self.seg.add();
-	}
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -498,18 +439,25 @@ enum PaneState {
 }
 
 impl PaneState {
-	fn new_names() -> Self {
-		Self::Names(NamesPane::new())
+	fn new_names(backend: Rc<Backend>) -> Self {
+		Self::Names(NamesPane::new(backend))
 	}
 
-	fn new_code() -> Self {
-		Self::Code(CodePane::new())
+	fn new_code(seg: SegId, backend: Rc<Backend>) -> Self {
+		Self::Code(CodePane::new(seg, backend))
 	}
 
 	fn view(&self) -> (Element<'_, Message>, String) {
 		match self {
 			PaneState::Names(n) => n.view(),
 			PaneState::Code(c)  => c.view(),
+		}
+	}
+
+	fn as_code(&self) -> &CodePane {
+		match self {
+			PaneState::Code(c) => c,
+			_ => panic!(),
 		}
 	}
 
@@ -526,20 +474,71 @@ impl PaneState {
 // ------------------------------------------------------------------------------------------------
 
 struct AdiFE {
+	backend: Rc<Backend>,
 	panes: pane_grid::State<PaneState>,
 	#[allow(dead_code)]
 	name_pane: pane_grid::Pane,
 	code_pane: pane_grid::Pane,
 }
 
+fn create_backend() -> Rc<Backend> {
+	Rc::new(loop {
+		let image = loop {
+			// TODO: temporary
+			let path = "/Users/me/src/re/adi/tests/data/smb.nes";
+			match adi::Image::new_from_file(path) {
+				Ok(image) => break image,
+				Err(e) => {
+					error!("Could not open {:?}: {}", path, e);
+					std::process::exit(1);
+				}
+			}
+			/*let path = DialogBuilder::file()
+				.set_location("~/src/re/adi/tests/data")
+				.open_single_file()
+				.show()
+				.unwrap();
+
+			match path {
+				Some(path) => {
+					match adi::Image::new_from_file(&path) {
+						Ok(image) => break image,
+						Err(e) => {
+							error!("Could not open {:?}: {}", path, e);
+						}
+					}
+				}
+				None => std::process::exit(1),
+			}*/
+		};
+
+		info!("opened image {}", image.name());
+
+		match Backend::on_new_thread(image) {
+			Ok(backend) => break backend,
+			Err(e) => error!("Could not analyze {}", e),
+		}
+	})
+}
+
 impl AdiFE {
-	fn new() -> Self {
-		let (mut panes, name_pane) = pane_grid::State::new(PaneState::new_names());
+	fn init() -> Self {
+		AdiFE::new(create_backend())
+	}
+
+	fn new(backend: Rc<Backend>) -> Self {
+		let (mut panes, name_pane) = pane_grid::State::new(PaneState::new_names(backend.clone()));
 		let (code_pane, split) = panes.split(
-			pane_grid::Axis::Vertical, name_pane, PaneState::new_code()).unwrap();
+			pane_grid::Axis::Vertical, name_pane, PaneState::new_code(
+				SegId(3), // TODO: temporary
+				backend.clone())).unwrap();
 		panes.resize(split, 0.2);
 
-		Self { panes, name_pane, code_pane }
+		Self { backend: backend.clone(), panes, name_pane, code_pane }
+	}
+
+	fn code_pane(&self) -> &CodePane {
+		self.panes.get(self.code_pane).unwrap().as_code()
 	}
 
 	fn code_pane_mut(&mut self) -> &mut CodePane {
@@ -554,14 +553,20 @@ impl AdiFE {
 			Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
 				self.panes.resize(split, ratio);
 			}
-			Message::OperandClicked { ea, opn } => {
-				println!("TODO: clicked operand {} of instruction at {:04X}", opn, ea);
+			Message::OperandClicked { bb_ea, instn, opn } => {
+				println!("TODO: clicked operand {} of instruction {} in BB {:?}",
+					opn, instn, bb_ea);
 			}
 			Message::JumpTo { ea } => {
-				return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
-					y: Some(f32::from_bits(ea as u32)), // item index
-					x: Some(80.0),                      // pixel offset from top
-				});
+				// TODO: switch segment too
+				if ea.seg() == self.code_pane().seg.segid() {
+					return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
+						y: Some(f32::from_bits(ea.offs() as u32)), // item index
+						x: Some(80.0),                             // pixel offset from top
+					});
+				} else {
+					println!("TODO: trying to switch to segment {:?}", ea.seg());
+				}
 			}
 			Message::JumpToTop =>  {
 				return operation::snap_to(CodePane::LIST_ID, RelativeOffset {
@@ -580,13 +585,6 @@ impl AdiFE {
 					x: 0.0,
 					y: if up { -20.0 } else { 20.0 },
 				});
-			}
-
-			Message::CodeViewChange { ea, kind } => {
-				self.code_pane_mut().change(ea, kind);
-			}
-			Message::AddItem => {
-				self.code_pane_mut().add();
 			}
 		}
 
@@ -609,8 +607,6 @@ impl AdiFE {
 			.min_size(200),
 
 			row![
-				button("add").on_press(Message::AddItem),
-				space().width(10),
 				button("top").on_press(Message::JumpToTop),
 				space().width(10),
 				button("bottom").on_press(Message::JumpToBottom),
@@ -620,11 +616,5 @@ impl AdiFE {
 				button("v").on_press(Message::Scroll { up: false }),
 			]
 		].into()
-	}
-}
-
-impl Default for AdiFE {
-	fn default() -> Self {
-		Self::new()
 	}
 }

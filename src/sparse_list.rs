@@ -7,6 +7,7 @@
 //! really have a concept of a "scroll position" the way a real Scrollable does. Scrolling is
 //! instead kind of always relative to the current position.
 
+use std::fmt::{ Write };
 use std::ops::{ Bound };
 use std::time::{ Instant, Duration };
 use std::collections::{ BTreeMap };
@@ -53,7 +54,7 @@ pub enum Change {
 
 /// The interface to the underlying content which you must implement for `SparseList` to be able to
 /// display your items.
-pub trait IContent<'a, V: 'a> {
+pub trait IContent<'a, V: 'a> where V: Copy {
 	/// how many items there are
 	fn len(&self) -> usize;
 
@@ -67,16 +68,16 @@ pub trait IContent<'a, V: 'a> {
 	fn last_index(&self) -> Option<usize>;
 
 	/// get the item with the given index, if it exists
-	fn get(&self, idx: usize) -> Option<&V>;
+	fn get(&self, idx: usize) -> Option<V>;
 
 	/// return an iterator over the items before (and not including) the item at `idx`. The items
 	/// should be given in reverse order!
 	fn items_before(&'a self, idx: usize)
-		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
+		-> Box<dyn Iterator<Item = (usize, V)> + 'a>;
 
 	/// return an iterator over the items after (and not including) the item at `idx`
 	fn items_after(&'a self, idx: usize)
-		-> Box<dyn DoubleEndedIterator<Item = (usize, &'a V)> + 'a>;
+		-> Box<dyn Iterator<Item = (usize, V)> + 'a>;
 
 	/// get a vector of changes which have occurred.
 	fn changes(&self) -> Vec<Change>;
@@ -86,9 +87,9 @@ pub trait IContent<'a, V: 'a> {
 // SparseList
 // ------------------------------------------------------------------------------------------------
 
-pub fn sparse_list<'a, T, Message, Theme, Renderer: iced_core::Renderer>(
+pub fn sparse_list<'a, T: Copy, Message, Theme, Renderer: iced_core::Renderer>(
 	content: &'a dyn IContent<'a, T>,
-	view_item: impl Fn(usize, &'a T) -> Element<'a, Message, Theme, Renderer> + 'a,
+	view_item: impl Fn(usize, T) -> Element<'a, Message, Theme, Renderer> + 'a,
 ) -> SparseList<'a, T, Message, Theme, Renderer> {
 	SparseList::new(content, view_item)
 }
@@ -105,22 +106,22 @@ pub fn sparse_list<'a, T, Message, Theme, Renderer: iced_core::Renderer>(
 ///   pixels below the top, and `-50.0` puts it 50 pixels *above* the top.
 /// - `scroll_by` works normally, though the `x` component is ignored.
 #[allow(missing_debug_implementations)]
-pub struct SparseList<'a, T, Message, Theme, Renderer> {
+pub struct SparseList<'a, T: Copy, Message, Theme, Renderer> {
 	id: Option<widget::Id>,
 	content: &'a dyn IContent<'a, T>,
 	view_item:
-		Box<dyn Fn(usize, &'a T) -> Element<'a, Message, Theme, Renderer> + 'a>,
+		Box<dyn Fn(usize, T) -> Element<'a, Message, Theme, Renderer> + 'a>,
 	visible_elements: BTreeMap<usize, Element<'a, Message, Theme, Renderer>>,
 }
 
-impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
+impl<'a, T: Copy, Message, Theme, Renderer: iced_core::Renderer>
 	SparseList<'a, T, Message, Theme, Renderer> {
 	pub fn new(
 		content: &'a dyn IContent<'a, T>,
-		view_item: impl Fn(usize, &'a T) -> Element<'a, Message, Theme, Renderer>
+		view_item: impl Fn(usize, T) -> Element<'a, Message, Theme, Renderer>
 			+ 'a,
 	) -> Self {
-		// println!("--------------------------NEW LIST-----------------------------");
+		// log::trace!("--------------------------NEW LIST-----------------------------");
 		Self {
 			id: None,
 			content,
@@ -139,7 +140,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	// 	self.new_element_with(idx, &self.content.get(idx).unwrap())
 	// }
 
-	fn new_element_with(&self, idx: usize, item: &'a T) -> Element<'a, Message, Theme, Renderer> {
+	fn new_element_with(&self, idx: usize, item: T) -> Element<'a, Message, Theme, Renderer> {
 		(self.view_item)(idx, item)
 	}
 
@@ -157,7 +158,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn elements_need_to_be_recreated(&self, state: &State) -> bool {
-		// println!("ELEMENTS = {}, LAYOUTS = {}",
+		// log::trace!("ELEMENTS = {}, LAYOUTS = {}",
 		// 	self.visible_elements.len(), state.visible_layouts.len());
 		assert!((self.visible_elements.len() == state.visible_layouts.len()) ||
 			(self.visible_elements.is_empty() && !state.visible_layouts.is_empty()));
@@ -174,7 +175,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			}
 		}
 
-		// self.dump_visible_indexes();
+		self.dump_visible_indexes();
 	}
 
 	/// recomputes all elements' y positions so they start at 0.0 and increase.
@@ -216,7 +217,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 	/// add an element to the list. `y` is the Y position it should be placed at; `heightfn` is a
 	/// callback called with the height of the newly-created item, useful for updating state.
-	fn add_element(&mut self, state: &mut State, renderer: &Renderer, idx: usize, item: &'a T,
+	fn add_element(&mut self, state: &mut State, renderer: &Renderer, idx: usize, item: T,
 	y: f32, mut heightfn: impl FnMut(f32)) {
 		let element = self.new_element_with(idx, item);
 		let mut tree = Tree::new(&element);
@@ -254,9 +255,10 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// items before it).
 	fn add_elements_before(&mut self, state: &mut State, renderer: &Renderer, original_idx: usize,
 	mut pixels_remaining: f32) -> f32 {
-		// println!("+ adding elements before {} ({} pixels)", original_idx, pixels_remaining);
+		// log::trace!("+ adding elements before {:04X} ({} pixels)", original_idx, pixels_remaining);
 		for (idx, item) in self.content.items_before(original_idx) {
 			if pixels_remaining <= 0.0 { break; }
+			// log::trace!("++ adding item at index {:04X}", idx);
 			self.add_element(state, renderer, idx, item, 0.0, |height| {
 				pixels_remaining -= height;
 			});
@@ -264,6 +266,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 		// now recompute their Y positions so that they start at Y = 0.
 		self.recompute_element_y_positions(state);
+		// log::trace!("+ {} pixels still remaining", pixels_remaining);
 		pixels_remaining
 	}
 
@@ -271,7 +274,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// if we ran out of elements (at the end of the list).
 	fn add_elements_after(&mut self, state: &mut State, renderer: &Renderer, original_idx: usize,
 	mut current_y: f32, mut pixels_remaining: f32) -> f32 {
-		// println!("+ adding elements after {} ({} pixels)", original_idx, pixels_remaining);
+		// log::trace!("+ adding elements after {} ({} pixels)", original_idx, pixels_remaining);
 		let mut ran_out_of_items = true;
 		for (idx, item) in self.content.items_after(original_idx) {
 			if pixels_remaining <= 0.0 {
@@ -291,7 +294,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 	/// removes elements at start of view as long as their bottom is below `view_top`. returns the
 	/// new updated scroll offset.
 	fn remove_elements_above(&mut self, state: &mut State, view_top: f32) -> f32 {
-		// println!("- removing elements above {}", view_top);
+		// log::trace!("- removing elements above {}", view_top);
 		let mut pixels_removed = 0.0;
 
 		while let Some((idx, bounds)) =
@@ -310,7 +313,7 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 
 	/// removes elements at end of view as long as their top is below `view_bottom`.
 	fn remove_elements_below(&mut self, state: &mut State, view_bottom: f32) {
-		// println!("- removing elements below {}", view_bottom);
+		// log::trace!("- removing elements below {}", view_bottom);
 		while let Some((idx, bounds)) =
 			state.visible_layouts.last_key_value().map(|(k, v)| (*k, v.0.bounds()))
 		{
@@ -584,13 +587,14 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			self.remove_elements_below(state, new_view_bottom);
 		}
 
-		// self.dump_visible_indexes();
+		self.dump_visible_indexes();
 		delta
 	}
 
 	#[allow(unused)]
 	fn dump_visible_indexes(&self) {
-		print!("visible: [");
+		let mut s = String::new();
+		write!(s, "visible: [");
 
 		let mut first = true;
 
@@ -598,16 +602,17 @@ impl<'a, T, Message, Theme, Renderer: iced_core::Renderer>
 			if first {
 				first = false;
 			} else {
-				print!(", ");
+				write!(s, ", ");
 			}
-			print!("{:04X}", idx);
+			write!(s, "{:04X}", idx);
 		}
 
-		println!("]");
+		write!(s, "]");
+		// log::trace!("{}", s);
 	}
 }
 
-impl<'a, T, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+impl<'a, T: Copy, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
 	for SparseList<'a, T, Message, Theme, Renderer>
 where
 	Renderer: iced_core::Renderer,
@@ -973,7 +978,7 @@ where
 	}
 }
 
-impl<'a, T, Message, Theme, Renderer>
+impl<'a, T: Copy, Message, Theme, Renderer>
 	From<SparseList<'a, T, Message, Theme, Renderer>>
 	for Element<'a, Message, Theme, Renderer>
 where
@@ -1093,9 +1098,9 @@ impl State {
 			self.offset_y = (self.absolute_offset(bounds.height, content_bounds.height) + delta.y)
 				.clamp(0.0, content_bounds.height - bounds.height);
 
-			// println!(":::::::::: scroll - State::scroll(), offset_y = {:?}", self.offset_y);
+			// log::trace!(":::::::::: scroll - State::scroll(), offset_y = {:?}", self.offset_y);
 		} else {
-			// println!(":::::::::: scroll - State::scroll() didn't scroll, bounds = {:?}, \
+			// log::trace!(":::::::::: scroll - State::scroll() didn't scroll, bounds = {:?}, \
 			// 	content_bounds = {:?}", bounds, content_bounds);
 		}
 	}
@@ -1115,10 +1120,10 @@ impl State {
 			let y = y.clamp(0.0, 1.0);
 
 			if y == 0.0 {
-				// println!(":::::::::: scroll - State::snap_to(Top)");
+				// log::trace!(":::::::::: scroll - State::snap_to(Top)");
 				self.new_position = Some(NewPosition::Top);
 			} else if y == 1.0 {
-				// println!(":::::::::: scroll - State::snap_to(Bottom)");
+				// log::trace!(":::::::::: scroll - State::snap_to(Bottom)");
 				self.new_position = Some(NewPosition::Bottom);
 			}
 		}
@@ -1127,13 +1132,13 @@ impl State {
 	fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
 		if let (Some(offset_y), Some(idx)) = (offset.x, offset.y) {
 			let idx = idx.to_bits() as usize;
-			// println!(":::::::::: scroll - State::scroll_to({:04X}) {}", idx, offset_y);
+			// log::trace!(":::::::::: scroll - State::scroll_to({:04X}) {}", idx, offset_y);
 			self.new_position = Some(NewPosition::Absolute { idx, offset_y });
 		}
 	}
 
 	fn scroll_by(&mut self, offset: f32) {
-		// println!(":::::::::: scroll - State::scroll_by({})", offset);
+		// log::trace!(":::::::::: scroll - State::scroll_by({})", offset);
 		self.scroll_by = Some(offset);
 	}
 
