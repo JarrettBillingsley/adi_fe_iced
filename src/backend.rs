@@ -11,10 +11,8 @@ use oneshot::{ Sender as OneshotSender, channel as oneshot_channel };
 use adi::{ EA, VA, SegId, PlatformResult, SpanIdx, Image, Program, Span, SpanKind, ImageSliceable,
 	BasicBlock, DataItem, IPrintOutput, PrintStyle, FmtResult, Type };
 
-use iced::{ color, Color };
-
 use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
-	StyledCodeData, UnknownData, UnknownLineData, SegmentData, FunctionData };
+	CodeText, UnknownData, UnknownLineData, SegmentData, FunctionData };
 
 // ------------------------------------------------------------------------------------------------
 // BackendEvent
@@ -492,9 +490,9 @@ fn respond<T>(tx: OneshotSender<T>, response: T) {
 
 struct UIRenderOutput {
 	mnemonic:   Option<String>,
-	operands:   Vec<StyledCodeData>,
+	operands:   Vec<CodeText>,
 	tmp_str:    String,
-	tmp_color:  Color,
+	tmp_style:  Option<PrintStyle>,
 	tmp_opn:    Option<u8>,
 }
 
@@ -504,16 +502,16 @@ impl UIRenderOutput {
 			mnemonic:   None,
 			operands:   vec![],
 			tmp_str:    String::new(),
-			tmp_color:  color!(0x000000),
+			tmp_style:  None,
 			tmp_opn:    None,
 		}
 	}
 
-	fn finish(mut self) -> (String, Vec<StyledCodeData>) {
+	fn finish(mut self) -> (String, Vec<CodeText>) {
 		// if there's anything still hanging around in the buffer, output it as plain text
 		if !self.tmp_str.is_empty() {
 			self.operands.push(
-				StyledCodeData::new(&std::mem::take(&mut self.tmp_str), color!(0xFFFFFF)));
+				CodeText::new_unstyled(&std::mem::take(&mut self.tmp_str)));
 		}
 
 		(self.mnemonic.unwrap_or("???".to_string()), self.operands)
@@ -532,22 +530,15 @@ impl IPrintOutput for UIRenderOutput {
 		// it as plain text.
 		if !self.tmp_str.is_empty() {
 			self.operands.push(
-				StyledCodeData::new(&std::mem::take(&mut self.tmp_str), color!(0xFFFFFF)));
+				CodeText::new_unstyled(&std::mem::take(&mut self.tmp_str)));
 		}
 
 		use PrintStyle::*;
 		match style {
-			Mnemonic   => { assert!(self.mnemonic.is_none()); }
-			Register   => { self.tmp_color = color!(0xFFFFFF); }
-			Number     => { self.tmp_color = color!(0x00FF00); }
-			Symbol     => { self.tmp_color = color!(0xFFFFFF); }
-			String     => { self.tmp_color = color!(0xFF7F00); }
-			Comment    => { self.tmp_color = color!(0x00AF00); }
-			Refname    => { self.tmp_color = color!(0xFFFFB0); }
-			Label      => { self.tmp_color = color!(0xA06000); }
-			Operand(opn) => {
-				self.tmp_opn = Some(opn as u8);
-			}
+			Mnemonic => { assert!(self.mnemonic.is_none()); }
+			Register | Number | Symbol | String | Comment | Refname |
+			Label => { self.tmp_style = Some(style); }
+			Operand(opn) => { self.tmp_opn = Some(opn as u8); }
 			_ => todo!("a new PrintStyle was added!"),
 		}
 
@@ -569,8 +560,8 @@ impl IPrintOutput for UIRenderOutput {
 			Refname |
 			Label => {
 				self.operands.push(
-					StyledCodeData::new_raw(&std::mem::take(&mut self.tmp_str),
-					self.tmp_color,
+					CodeText::new_raw(&std::mem::take(&mut self.tmp_str),
+					self.tmp_style,
 					self.tmp_opn)); // works regardless of if we're in an operand
 			}
 
@@ -579,9 +570,9 @@ impl IPrintOutput for UIRenderOutput {
 
 				if !self.tmp_str.is_empty() {
 					self.operands.push(
-						StyledCodeData::new_op(&std::mem::take(&mut self.tmp_str),
-							self.tmp_color,
-							opn as u8));
+						CodeText::new_raw(&std::mem::take(&mut self.tmp_str),
+							self.tmp_style,
+							Some(opn as u8)));
 				}
 			}
 

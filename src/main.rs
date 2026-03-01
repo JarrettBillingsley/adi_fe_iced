@@ -11,7 +11,7 @@ use iced::font::{ Weight };
 use iced::widget::{ pane_grid, text, column, row, span, container, scrollable, text::Rich, button,
 	operation::{ self, AbsoluteOffset, RelativeOffset }, space };
 
-use adi::{ EA, Span, SegId, SpanKind };
+use adi::{ EA, Span, SegId, SpanKind, PrintStyle };
 
 use simplelog::*;
 use log::*;
@@ -126,7 +126,30 @@ impl CodeLink {
 // Rendering to TextSpans
 // ------------------------------------------------------------------------------------------------
 
-// TODO: have the backend render directly to text::Span (it is Send).
+trait PrintStyleColor {
+	fn color(&self) -> iced::Color;
+}
+
+impl PrintStyleColor for Option<PrintStyle> {
+	fn color(&self) -> iced::Color {
+		use PrintStyle::*;
+		use iced::{ color };
+		match self {
+			None             => color!(0xFFFFFF),
+			Some(Mnemonic)   => color!(0xFF0000),
+			Some(Register)   => color!(0xFFFFFF),
+			Some(Number)     => color!(0x00FF00),
+			Some(Symbol)     => color!(0xFFFFFF),
+			Some(String)     => color!(0xFF7F00),
+			Some(Comment)    => color!(0x00AF00),
+			Some(Refname)    => color!(0xFFFFB0),
+			Some(Label)      => color!(0xA06000),
+			Some(Operand(_)) => unreachable!(),
+			_          => todo!("a new PrintStyle was added!"),
+		}
+	}
+}
+
 impl BasicBlockData {
 	fn render(&self) -> Vec<TextSpan<'static, CodeLink>> {
 		let mut spans = Vec::new();
@@ -182,7 +205,7 @@ impl BasicBlockData {
 
 			// operands
 			for op in line.operands.iter() {
-				let mut span = span(op.text.clone()).color(op.color);
+				let mut span = span(op.text.clone()).color(op.style.color());
 
 				if let Some(opn) = op.opn {
 					span = span.link(CodeLink::Operand {
@@ -406,10 +429,7 @@ impl CodePane {
 		let list = sparse_list(
 			&self.seg,
 			|_, ea: EA| {
-				let rendered = self.seg.render_span(ea);
-				let rendered = rendered.render();
-
-				container(Rich::with_spans(rendered)
+				container(Rich::with_spans(self.seg.render_span(ea).render())
 					.on_link_click(CodeLink::into_message)
 					.font(CONSOLAS_FONT.bold())
 				)

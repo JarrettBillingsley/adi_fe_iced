@@ -1,7 +1,6 @@
 #![allow(unused)]
 
-use iced::{ Color };
-use adi::{ EA, SegId };
+use adi::{ EA, SegId, PrintStyle };
 
 // ------------------------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------------------------
@@ -40,27 +39,35 @@ pub struct SegmentData {
 
 /// Data for a piece of colored text, with an optional operand number.
 #[derive(Debug, Clone)]
-pub struct StyledCodeData {
+pub struct CodeText {
 	pub text:  String,
-	pub color: Color,
+	pub style: Option<PrintStyle>,
 	pub opn:   Option<u8>,
 }
 
-impl StyledCodeData {
-	pub fn new(text: &str, color: impl Into<Color>) -> Self {
-		Self::new_raw(text, color, None)
+impl CodeText {
+	pub fn new(text: &str, style: PrintStyle) -> Self {
+		Self::new_raw(text, Some(style), None)
 	}
 
-	pub fn new_op(text: &str, color: impl Into<Color>, opn: u8) -> Self {
-		Self::new_raw(text, color, Some(opn))
+	pub fn new_op(text: &str, style: PrintStyle, opn: u8) -> Self {
+		Self::new_raw(text, Some(style), Some(opn))
 	}
 
-	pub fn new_raw(text: &str, color: impl Into<Color>, opn: Option<u8>) -> Self {
+	pub fn new_unstyled(text: &str) -> Self {
+		Self::new_raw(text, None, None)
+	}
+
+	pub fn new_raw(text: &str, style: Option<PrintStyle>, opn: Option<u8>) -> Self {
 		Self {
 			text:  text.into(),
-			color: color.into(),
+			style,
 			opn,
 		}
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.text.is_empty()
 	}
 }
 
@@ -70,7 +77,7 @@ pub struct CodeLineData {
 	pub ea:       TextEA,
 	pub bytes:    String,
 	pub mnemonic: String,
-	pub operands: Vec<StyledCodeData>,
+	pub operands: Vec<CodeText>,
 }
 
 /// Data about a function, to be put at the top of a function in the code listing.
