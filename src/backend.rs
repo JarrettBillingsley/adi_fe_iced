@@ -12,7 +12,7 @@ use adi::{ EA, VA, SegId, PlatformResult, SpanIdx, Image, Program, Span, SpanKin
 	BasicBlock, DataItem, IPrintOutput, PrintStyle, FmtResult, Type };
 
 use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
-	CodeText, UnknownData, UnknownLineData, SegmentData, FunctionData };
+	CodeOpData, UnknownData, UnknownLineData, SegmentData, FunctionData };
 
 // ------------------------------------------------------------------------------------------------
 // BackendEvent
@@ -490,7 +490,7 @@ fn respond<T>(tx: OneshotSender<T>, response: T) {
 
 struct UIRenderOutput {
 	mnemonic:   Option<String>,
-	operands:   Vec<CodeText>,
+	operands:   Vec<CodeOpData>,
 	tmp_str:    String,
 	tmp_style:  Option<PrintStyle>,
 	tmp_opn:    Option<u8>,
@@ -507,11 +507,11 @@ impl UIRenderOutput {
 		}
 	}
 
-	fn finish(mut self) -> (String, Vec<CodeText>) {
+	fn finish(mut self) -> (String, Vec<CodeOpData>) {
 		// if there's anything still hanging around in the buffer, output it as plain text
 		if !self.tmp_str.is_empty() {
 			self.operands.push(
-				CodeText::new_unstyled(&std::mem::take(&mut self.tmp_str)));
+				CodeOpData::new_plain(std::mem::take(&mut self.tmp_str)));
 		}
 
 		(self.mnemonic.unwrap_or("???".to_string()), self.operands)
@@ -529,16 +529,23 @@ impl IPrintOutput for UIRenderOutput {
 		// if something is in the buffer, it was printed *outside* of any begin/end calls; so output
 		// it as plain text.
 		if !self.tmp_str.is_empty() {
-			self.operands.push(
-				CodeText::new_unstyled(&std::mem::take(&mut self.tmp_str)));
+			self.operands.push(CodeOpData::new_plain(std::mem::take(&mut self.tmp_str)));
 		}
 
 		use PrintStyle::*;
 		match style {
-			Mnemonic => { assert!(self.mnemonic.is_none()); }
-			Register | Number | Symbol | String | Comment | Refname |
-			Label => { self.tmp_style = Some(style); }
-			Operand(opn) => { self.tmp_opn = Some(opn as u8); }
+			Mnemonic => {
+				assert!(self.mnemonic.is_none());
+			}
+
+			Register | Number | Symbol | String | Comment | Refname | Label => {
+				self.tmp_style = Some(style);
+			}
+
+			Operand(opn) => {
+				self.tmp_opn = Some(opn as u8);
+			}
+
 			_ => todo!("a new PrintStyle was added!"),
 		}
 
@@ -552,15 +559,8 @@ impl IPrintOutput for UIRenderOutput {
 				self.mnemonic = Some(std::mem::take(&mut self.tmp_str));
 			}
 
-			Register |
-			Number |
-			Symbol |
-			String |
-			Comment |
-			Refname |
-			Label => {
-				self.operands.push(
-					CodeText::new_raw(&std::mem::take(&mut self.tmp_str),
+			Register | Number | Symbol | String | Comment | Refname | Label => {
+				self.operands.push(CodeOpData::new(std::mem::take(&mut self.tmp_str),
 					self.tmp_style,
 					self.tmp_opn)); // works regardless of if we're in an operand
 			}
@@ -569,10 +569,9 @@ impl IPrintOutput for UIRenderOutput {
 				self.tmp_opn = None;
 
 				if !self.tmp_str.is_empty() {
-					self.operands.push(
-						CodeText::new_raw(&std::mem::take(&mut self.tmp_str),
-							self.tmp_style,
-							Some(opn as u8)));
+					self.operands.push(CodeOpData::new(std::mem::take(&mut self.tmp_str),
+						self.tmp_style,
+						Some(opn as u8)));
 				}
 			}
 

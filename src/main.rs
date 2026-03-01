@@ -192,12 +192,27 @@ struct SpanRenderer {
 }
 
 impl SpanRenderer {
+	// --------------------------------------------------------------------------------------------
+	// Lifecycle
+
 	fn new() -> Self {
 		Self { spans: vec![] }
 	}
 
 	fn finish(self) -> Vec<TextSpan<'static, CodeLink>> {
 		self.spans
+	}
+
+	// --------------------------------------------------------------------------------------------
+	// Making and pushing spans
+
+	fn make_span(&self, s: impl Into<String>, color: u32) -> TextSpan<'static, CodeLink> {
+		span(s.into())
+			.color(iced::Color::from_rgb8(
+				((color >> 16) & 0xFF) as u8,
+				((color >> 8) & 0xFF) as u8,
+				(color & 0xFF) as u8)
+			)
 	}
 
 	fn push(&mut self, s: impl Into<String>, color: u32) -> &mut Self {
@@ -210,14 +225,8 @@ impl SpanRenderer {
 		self
 	}
 
-	fn make_span(&self, s: impl Into<String>, color: u32) -> TextSpan<'static, CodeLink> {
-		span(s.into())
-			.color(iced::Color::from_rgb8(
-				((color >> 16) & 0xFF) as u8,
-				((color >> 8) & 0xFF) as u8,
-				(color & 0xFF) as u8)
-			)
-	}
+	// --------------------------------------------------------------------------------------------
+	// Rendering methods
 
 	fn plain(&mut self, s: impl Into<String>) -> &mut Self {
 		self.push(s, color_of(PrintStyleEx::Plain))
@@ -227,16 +236,8 @@ impl SpanRenderer {
 		self.push(s, color_of(PrintStyle::Comment))
 	}
 
-	fn label(&mut self, s: impl Into<String>) -> &mut Self {
-		self.push(s, color_of(PrintStyle::Label))
-	}
-
 	fn seg_name(&mut self, s: impl Into<String>) -> &mut Self {
 		self.push(s, color_of(PrintStyleEx::SegName))
-	}
-
-	fn code_bytes(&mut self, s: impl Into<String>) -> &mut Self {
-		self.push(s, color_of(PrintStyleEx::CodeBytes))
 	}
 
 	fn mnemonic(&mut self, s: impl Into<String>) -> &mut Self {
@@ -254,75 +255,65 @@ impl SpanRenderer {
 	fn newline(&mut self) -> &mut Self {
 		self.plain("\n")
 	}
+
+	fn label(&mut self, s: String) -> &mut Self {
+		if !s.is_empty() {
+			let s = format!("                   {}", s);
+			self.push(s, color_of(PrintStyle::Label)).plain(":").newline();
+		}
+		self
+	}
+
+	fn code_bytes(&mut self, bytes: String) -> &mut Self {
+		self.push(format!(" {:8}     ", bytes), color_of(PrintStyleEx::CodeBytes))
+	}
+
+	fn func_data(&mut self, data: FunctionData) -> &mut Self {
+		if data.name.is_empty() {
+			return self;
+		}
+
+		self.comment(
+			"; ------------------------------------------------------------------------------")
+			.newline();
+
+		if data.is_piece {
+			self.comment(format!("; (Piece of function {})", data.name)).newline();
+		} else {
+			self.comment(format!("; Function {}", data.name)).newline();
+
+			if !data.attrs.is_empty() {
+				self.comment(format!("; Attributes: {}", data.attrs)).newline();
+			}
+
+			if !data.entrypoints.is_empty() {
+				self.comment(format!("; Entry points: {}", data.entrypoints)).newline();
+			}
+		}
+
+		self
+	}
+
+	fn ea(&mut self, ea: TextEA) -> &mut Self {
+		self.seg_name(ea.seg).plain(format!(":{}", ea.offs))
+	}
+
+	fn operand(&mut self, op: CodeOpData, bb_ea: EA, instn: usize) -> &mut Self {
+		if let Some(opn) = op.opn {
+			self.push_link(op.text, color_of(op.style), CodeLink::Operand {
+				bb_ea,
+				instn,
+				opn: opn.into()
+			})
+		} else {
+			self.push(op.text, color_of(op.style))
+		}
+	}
 }
 
 // ------------------------------------------------------------------------------------------------
 // Rendering methods for various pieces of code
 // ------------------------------------------------------------------------------------------------
-
-impl FunctionData {
-	fn render_to(self, r: &mut SpanRenderer) {
-		if self.name.is_empty() {
-			return;
-		}
-
-		r.comment(
-			"; ------------------------------------------------------------------------------")
-			.newline();
-
-		if self.is_piece {
-			r.comment(format!("; (Piece of function {})", self.name)).newline();
-		} else {
-			r.comment(format!("; Function {}", self.name)).newline();
-
-			if !self.attrs.is_empty() {
-				r.comment(format!("; Attributes: {}", self.attrs)).newline();
-			}
-
-			if !self.entrypoints.is_empty() {
-				r.comment(format!("; Entry points: {}", self.entrypoints)).newline();
-			}
-		}
-	}
-}
-
-struct CodeLabel(String);
-
-impl CodeLabel {
-	fn render_to(self, r: &mut SpanRenderer) {
-		if !self.0.is_empty() {
-			r.label(format!("                   {}", self.0)).plain(":").newline();
-		}
-	}
-}
-
-impl TextEA {
-	fn render_to(self, r: &mut SpanRenderer) {
-		r.seg_name(self.seg).plain(format!(":{}", self.offs));
-	}
-}
-
-struct CodeBytes(String);
-
-impl CodeBytes {
-	fn render_to(self, r: &mut SpanRenderer) {
-		r.code_bytes(format!(" {:8}     ", self.0));
-	}
-}
-
-impl CodeText {
-	fn render_to(self, r: &mut SpanRenderer, bb_ea: EA, instn: usize) {
-		if let Some(opn) = self.opn {
-			r.push_link(self.text, color_of(self.style), CodeLink::Operand {
-				bb_ea,
-				instn,
-				opn: opn.into()
-			});
-		} else {
-			r.push(self.text, color_of(self.style));
-		}
-	}
-}
 
 impl BasicBlockData {
 	fn render(self) -> Vec<TextSpan<'static, CodeLink>> {
@@ -331,26 +322,18 @@ impl BasicBlockData {
 		// TODO: inrefs
 		// TODO: MMU state
 
-		// function name, attrs, entry points
-		self.func.render_to(&mut r);
-
-		// label
-		CodeLabel(self.label).render_to(&mut r);
+		r.func_data(self.func)
+			.label(self.label);
 
 		// lines of code
 		for (i, line) in self.lines.into_iter().enumerate() {
-			// seg:offs
-			line.ea.render_to(&mut r);
+			r.ea(line.ea)
+				.code_bytes(line.bytes)
+				.mnemonic(line.mnemonic)
+				.plain(" ");
 
-			// bytes
-			CodeBytes(line.bytes).render_to(&mut r);
-
-			// mnemonic
-			r.mnemonic(line.mnemonic).plain(" ");
-
-			// operands
 			for op in line.operands.into_iter() {
-				op.render_to(&mut r, self.ea, i);
+				r.operand(op, self.ea, i);
 			}
 
 			// TODO: outrefs
@@ -367,11 +350,9 @@ impl UnknownData {
 		let mut r = SpanRenderer::new();
 
 		for line in self.lines.into_iter() {
-			// seg:offs
-			line.ea.render_to(&mut r);
-
-			// bytes
-			r.unknown_bytes(format!(" {}", line.bytes)).newline();
+			r.ea(line.ea)
+				.unknown_bytes(format!(" {}", line.bytes))
+				.newline();
 		}
 
 		r.newline();
@@ -384,7 +365,7 @@ impl CodeViewItem {
 		match self {
 			CodeViewItem::BasicBlock(bb) => bb.render(),
 			CodeViewItem::DataItem => {
-				// TODO:
+				// TODO: data rendering
 				let mut r = SpanRenderer::new();
 				r.error("AAAAAAAA DATA UNIMPLEMENTED");
 				r.finish()

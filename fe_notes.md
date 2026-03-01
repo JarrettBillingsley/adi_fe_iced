@@ -5,6 +5,9 @@
 	- label
 	- instruction/data/unknown
 	- outrefs
+- first window should have a list of recent files
+	- *then* if you want to open a new one, it opens the file dialog
+	- really that whole initial process is just a temporary thing
 
 ---
 

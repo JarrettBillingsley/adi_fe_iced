@@ -14,7 +14,7 @@ pub struct TextEA {
 }
 
 impl TextEA {
-	pub fn new(seg: &str, offs: &str) -> Self {
+	pub fn new(seg: impl Into<String>, offs: impl Into<String>) -> Self {
 		TextEA {
 			seg: seg.into(),
 			offs: offs.into(),
@@ -37,33 +37,21 @@ pub struct SegmentData {
 	pub is_image: bool,
 }
 
-/// Data for a piece of colored text, with an optional operand number.
+/// Data for a single instruction operand, with an optional operand number.
 #[derive(Debug, Clone)]
-pub struct CodeText {
+pub struct CodeOpData {
 	pub text:  String,
 	pub style: Option<PrintStyle>,
 	pub opn:   Option<u8>,
 }
 
-impl CodeText {
-	pub fn new(text: &str, style: PrintStyle) -> Self {
-		Self::new_raw(text, Some(style), None)
+impl CodeOpData {
+	pub fn new(text: impl Into<String>, style: Option<PrintStyle>, opn: Option<u8>) -> Self {
+		Self { text: text.into(), style, opn }
 	}
 
-	pub fn new_op(text: &str, style: PrintStyle, opn: u8) -> Self {
-		Self::new_raw(text, Some(style), Some(opn))
-	}
-
-	pub fn new_unstyled(text: &str) -> Self {
-		Self::new_raw(text, None, None)
-	}
-
-	pub fn new_raw(text: &str, style: Option<PrintStyle>, opn: Option<u8>) -> Self {
-		Self {
-			text:  text.into(),
-			style,
-			opn,
-		}
+	pub fn new_plain(text: impl Into<String>) -> Self {
+		Self::new(text, None, None)
 	}
 
 	pub fn is_empty(&self) -> bool {
@@ -77,7 +65,7 @@ pub struct CodeLineData {
 	pub ea:       TextEA,
 	pub bytes:    String,
 	pub mnemonic: String,
-	pub operands: Vec<CodeText>,
+	pub operands: Vec<CodeOpData>,
 }
 
 /// Data about a function, to be put at the top of a function in the code listing.
