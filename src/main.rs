@@ -200,12 +200,14 @@ impl SpanRenderer {
 		self.spans
 	}
 
-	fn push(&mut self, s: impl Into<String>, color: u32) {
+	fn push(&mut self, s: impl Into<String>, color: u32) -> &mut Self {
 		self.spans.push(self.make_span(s, color));
+		self
 	}
 
-	fn push_link(&mut self, s: impl Into<String>, color: u32, link: CodeLink) {
+	fn push_link(&mut self, s: impl Into<String>, color: u32, link: CodeLink) -> &mut Self {
 		self.spans.push(self.make_span(s, color).link(link));
+		self
 	}
 
 	fn make_span(&self, s: impl Into<String>, color: u32) -> TextSpan<'static, CodeLink> {
@@ -217,36 +219,40 @@ impl SpanRenderer {
 			)
 	}
 
-	fn plain(&mut self, s: impl Into<String>) {
-		self.push(s, color_of(PrintStyleEx::Plain));
+	fn plain(&mut self, s: impl Into<String>) -> &mut Self {
+		self.push(s, color_of(PrintStyleEx::Plain))
 	}
 
-	fn comment(&mut self, s: impl Into<String>) {
-		self.push(s, color_of(PrintStyle::Comment));
+	fn comment(&mut self, s: impl Into<String>) -> &mut Self {
+		self.push(s, color_of(PrintStyle::Comment))
 	}
 
-	fn label(&mut self, s: impl Into<String>) {
-		self.push(s, color_of(PrintStyle::Label));
+	fn label(&mut self, s: impl Into<String>) -> &mut Self {
+		self.push(s, color_of(PrintStyle::Label))
 	}
 
-	fn seg_name(&mut self, s: impl Into<String>) {
-		self.push(s, color_of(PrintStyleEx::SegName));
+	fn seg_name(&mut self, s: impl Into<String>) -> &mut Self {
+		self.push(s, color_of(PrintStyleEx::SegName))
 	}
 
-	fn code_bytes(&mut self, s: impl Into<String>) {
-		self.push(s, color_of(PrintStyleEx::CodeBytes));
+	fn code_bytes(&mut self, s: impl Into<String>) -> &mut Self {
+		self.push(s, color_of(PrintStyleEx::CodeBytes))
 	}
 
-	fn mnemonic(&mut self, s: impl Into<String>) {
-		self.push(s, color_of(PrintStyle::Mnemonic));
+	fn mnemonic(&mut self, s: impl Into<String>) -> &mut Self {
+		self.push(s, color_of(PrintStyle::Mnemonic))
 	}
 
-	fn unknown_bytes(&mut self, s: impl Into<String>) {
-		self.push(s, color_of(PrintStyleEx::Unknown));
+	fn unknown_bytes(&mut self, s: impl Into<String>) -> &mut Self {
+		self.push(s, color_of(PrintStyleEx::Unknown))
 	}
 
-	fn error(&mut self, s: impl Into<String>) {
-		self.push(s, color_of(PrintStyleEx::Error));
+	fn error(&mut self, s: impl Into<String>) -> &mut Self {
+		self.push(s, color_of(PrintStyleEx::Error))
+	}
+
+	fn newline(&mut self) -> &mut Self {
+		self.plain("\n")
 	}
 }
 
@@ -261,19 +267,20 @@ impl FunctionData {
 		}
 
 		r.comment(
-			"; ------------------------------------------------------------------------------\n");
+			"; ------------------------------------------------------------------------------")
+			.newline();
 
 		if self.is_piece {
-			r.comment(format!("; (Piece of function {})\n", self.name));
+			r.comment(format!("; (Piece of function {})", self.name)).newline();
 		} else {
-			r.comment(format!("; Function {}\n", self.name));
+			r.comment(format!("; Function {}", self.name)).newline();
 
 			if !self.attrs.is_empty() {
-				r.comment(format!("; Attributes: {}\n", self.attrs));
+				r.comment(format!("; Attributes: {}", self.attrs)).newline();
 			}
 
 			if !self.entrypoints.is_empty() {
-				r.comment(format!("; Entry points: {}\n", self.entrypoints));
+				r.comment(format!("; Entry points: {}", self.entrypoints)).newline();
 			}
 		}
 	}
@@ -284,16 +291,14 @@ struct CodeLabel(String);
 impl CodeLabel {
 	fn render_to(self, r: &mut SpanRenderer) {
 		if !self.0.is_empty() {
-			r.label(format!("                   {}", self.0));
-			r.plain(":\n");
+			r.label(format!("                   {}", self.0)).plain(":").newline();
 		}
 	}
 }
 
 impl TextEA {
 	fn render_to(self, r: &mut SpanRenderer) {
-		r.seg_name(self.seg);
-		r.plain(format!(":{}", self.offs));
+		r.seg_name(self.seg).plain(format!(":{}", self.offs));
 	}
 }
 
@@ -341,18 +346,18 @@ impl BasicBlockData {
 			CodeBytes(line.bytes).render_to(&mut r);
 
 			// mnemonic
-			r.mnemonic(line.mnemonic);
-			r.plain(" ");
+			r.mnemonic(line.mnemonic).plain(" ");
 
 			// operands
 			for op in line.operands.into_iter() {
 				op.render_to(&mut r, self.ea, i);
 			}
 
-			r.plain("\n");
+			// TODO: outrefs
+			r.newline();
 		}
 
-		r.plain("\n");
+		r.newline();
 		r.finish()
 	}
 }
@@ -366,10 +371,10 @@ impl UnknownData {
 			line.ea.render_to(&mut r);
 
 			// bytes
-			r.unknown_bytes(format!(" {}\n", line.bytes));
+			r.unknown_bytes(format!(" {}", line.bytes)).newline();
 		}
 
-		r.plain("\n");
+		r.newline();
 		r.finish()
 	}
 }
