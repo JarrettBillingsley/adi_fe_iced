@@ -398,6 +398,10 @@ impl CodePane {
 		}
 	}
 
+	fn set_segment(&mut self, seg: SegId) {
+		self.seg = SegmentView::new(seg, self.seg.backend.clone());
+	}
+
 	fn view(&self) -> (Element<'_, Message>, String) {
 		let list = sparse_list(
 			&self.seg,
@@ -558,15 +562,16 @@ impl AdiFE {
 					opn, instn, bb_ea);
 			}
 			Message::JumpTo { ea } => {
-				// TODO: switch segment too
-				if ea.seg() == self.code_pane().seg.segid() {
-					return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
-						y: Some(f32::from_bits(ea.offs() as u32)), // item index
-						x: Some(80.0),                             // pixel offset from top
-					});
-				} else {
-					println!("TODO: trying to switch to segment {:?}", ea.seg());
+				let code_pane = self.code_pane_mut();
+
+				if code_pane.seg.segid() != ea.seg() {
+					code_pane.set_segment(ea.seg());
 				}
+
+				return operation::scroll_to(CodePane::LIST_ID, AbsoluteOffset {
+					y: Some(f32::from_bits(ea.offs() as u32)), // item index
+					x: Some(80.0),                             // pixel offset from top
+				});
 			}
 			Message::JumpToTop =>  {
 				return operation::snap_to(CodePane::LIST_ID, RelativeOffset {
