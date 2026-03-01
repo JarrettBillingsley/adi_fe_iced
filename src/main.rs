@@ -11,7 +11,7 @@ use iced::font::{ Weight };
 use iced::widget::{ pane_grid, text, column, row, span, container, scrollable, text::Rich, button,
 	operation::{ self, AbsoluteOffset, RelativeOffset }, space };
 
-use adi::{ EA, Span, SegId, SpanKind, PrintStyle };
+use adi::{ EA, Span, SegId, SpanKind, PrintStyle, Image };
 
 use simplelog::*;
 use log::*;
@@ -617,6 +617,58 @@ impl PaneState {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Image loading and backend creation
+// ------------------------------------------------------------------------------------------------
+
+fn open_image() -> Image {
+	// first try command-line arguments
+	let args = std::env::args().collect::<Vec<_>>();
+
+	if args.len() == 2 {
+		match Image::new_from_file(&args[1]) {
+			Ok(image) => return image,
+			Err(e) => {
+				error!("Could not open {:?}: {}", args[1], e);
+				std::process::exit(1);
+			}
+		}
+	}
+
+	// then use a file dialog
+	loop {
+		let path = DialogBuilder::file()
+			.set_location("~/src/re/adi/tests/data")
+			.open_single_file()
+			.show()
+			.unwrap();
+
+		match path {
+			Some(path) => {
+				match Image::new_from_file(&path) {
+					Ok(image) => return image,
+					Err(e) => {
+						error!("Could not open {:?}: {}", path, e);
+					}
+				}
+			}
+			None => std::process::exit(1),
+		}
+	};
+}
+
+fn create_backend() -> Rc<Backend> {
+	Rc::new(loop {
+		let image = open_image();
+		info!("opened image {}", image.name());
+
+		match Backend::on_new_thread(image) {
+			Ok(backend) => break backend,
+			Err(e) => error!("Could not analyze {}", e),
+		}
+	})
+}
+
+// ------------------------------------------------------------------------------------------------
 // AdiFE
 // ------------------------------------------------------------------------------------------------
 
@@ -626,46 +678,6 @@ struct AdiFE {
 	#[allow(dead_code)]
 	name_pane: pane_grid::Pane,
 	code_pane: pane_grid::Pane,
-}
-
-fn create_backend() -> Rc<Backend> {
-	Rc::new(loop {
-		let image = loop {
-			// TODO: temporary
-			let path = "/Users/me/src/re/adi/tests/data/smb.nes";
-			match adi::Image::new_from_file(path) {
-				Ok(image) => break image,
-				Err(e) => {
-					error!("Could not open {:?}: {}", path, e);
-					std::process::exit(1);
-				}
-			}
-			/*let path = DialogBuilder::file()
-				.set_location("~/src/re/adi/tests/data")
-				.open_single_file()
-				.show()
-				.unwrap();
-
-			match path {
-				Some(path) => {
-					match adi::Image::new_from_file(&path) {
-						Ok(image) => break image,
-						Err(e) => {
-							error!("Could not open {:?}: {}", path, e);
-						}
-					}
-				}
-				None => std::process::exit(1),
-			}*/
-		};
-
-		info!("opened image {}", image.name());
-
-		match Backend::on_new_thread(image) {
-			Ok(backend) => break backend,
-			Err(e) => error!("Could not analyze {}", e),
-		}
-	})
 }
 
 impl AdiFE {
