@@ -123,131 +123,267 @@ impl CodeLink {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Rendering to TextSpans
+// PrintStyleEx
 // ------------------------------------------------------------------------------------------------
 
-trait PrintStyleColor {
-	fn color(&self) -> iced::Color;
+/// Extended printing style enumeration for more things than ADI provides.
+#[non_exhaustive]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum PrintStyleEx {
+	Plain,
+	SegName,
+	CodeBytes,
+	Unknown,
+	Error,
+	Adi(PrintStyle),
 }
 
-impl PrintStyleColor for Option<PrintStyle> {
-	fn color(&self) -> iced::Color {
+impl From<PrintStyle> for PrintStyleEx {
+	fn from(other: PrintStyle) -> Self {
+		Self::Adi(other)
+	}
+}
+
+impl From<Option<PrintStyle>> for PrintStyleEx {
+	fn from(other: Option<PrintStyle>) -> Self {
 		use PrintStyle::*;
-		use iced::{ color };
-		match self {
-			None             => color!(0xFFFFFF),
-			Some(Mnemonic)   => color!(0xFF0000),
-			Some(Register)   => color!(0xFFFFFF),
-			Some(Number)     => color!(0x00FF00),
-			Some(Symbol)     => color!(0xFFFFFF),
-			Some(String)     => color!(0xFF7F00),
-			Some(Comment)    => color!(0x00AF00),
-			Some(Refname)    => color!(0xFFFFB0),
-			Some(Label)      => color!(0xA06000),
-			Some(Operand(_)) => unreachable!(),
-			_          => todo!("a new PrintStyle was added!"),
+		match other {
+			None             => Self::Plain,
+			Some(Operand(_)) => panic!("trying to turn operand into a style"),
+			Some(ps)         => Self::Adi(ps),
+		}
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// color_of
+// ------------------------------------------------------------------------------------------------
+
+fn color_of(style: impl Into<PrintStyleEx>) -> u32 {
+	use PrintStyle::*;
+	use PrintStyleEx::*;
+	match style.into() {
+		// TODO: make colors configurable
+		Plain           => 0xFFFFFF, // white
+		SegName         => 0xFFFF00, // yellow
+		CodeBytes       => 0x8080FF, // light blue
+		Unknown         => 0xFF7F00, // orange
+		Error           => 0xFF4040, // light red
+		Adi(Mnemonic)   => 0xFF0000, // red
+		Adi(Register)   => 0xFFFFFF, // white
+		Adi(Number)     => 0x00FF00, // bright green
+		Adi(Symbol)     => 0xFFFFFF, // white
+		Adi(String)     => 0xFF7F00, // orange
+		Adi(Comment)    => 0x00AF00, // dark green
+		Adi(Refname)    => 0xFFFFB0, // light tan
+		Adi(Label)      => 0xA06000, // light brown
+		Adi(Operand(_)) => panic!("trying to get the color of an operand"),
+		Adi(_)          => todo!("a new PrintStyle was added!"),
+		_               => todo!("new PrintStyleEx was added!"),
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// SpanRenderer
+// ------------------------------------------------------------------------------------------------
+
+struct SpanRenderer {
+	spans: Vec<TextSpan<'static, CodeLink>>,
+}
+
+impl SpanRenderer {
+	fn new() -> Self {
+		Self { spans: vec![] }
+	}
+
+	fn finish(self) -> Vec<TextSpan<'static, CodeLink>> {
+		self.spans
+	}
+
+	fn push(&mut self, s: impl Into<String>, color: u32) {
+		self.spans.push(self.make_span(s, color));
+	}
+
+	fn push_link(&mut self, s: impl Into<String>, color: u32, link: CodeLink) {
+		self.spans.push(self.make_span(s, color).link(link));
+	}
+
+	fn make_span(&self, s: impl Into<String>, color: u32) -> TextSpan<'static, CodeLink> {
+		span(s.into())
+			.color(iced::Color::from_rgb8(
+				((color >> 16) & 0xFF) as u8,
+				((color >> 8) & 0xFF) as u8,
+				(color & 0xFF) as u8)
+			)
+	}
+
+	fn plain(&mut self, s: impl Into<String>) {
+		self.push(s, color_of(PrintStyleEx::Plain));
+	}
+
+	fn comment(&mut self, s: impl Into<String>) {
+		self.push(s, color_of(PrintStyle::Comment));
+	}
+
+	fn label(&mut self, s: impl Into<String>) {
+		self.push(s, color_of(PrintStyle::Label));
+	}
+
+	fn seg_name(&mut self, s: impl Into<String>) {
+		self.push(s, color_of(PrintStyleEx::SegName));
+	}
+
+	fn code_bytes(&mut self, s: impl Into<String>) {
+		self.push(s, color_of(PrintStyleEx::CodeBytes));
+	}
+
+	fn mnemonic(&mut self, s: impl Into<String>) {
+		self.push(s, color_of(PrintStyle::Mnemonic));
+	}
+
+	fn unknown_bytes(&mut self, s: impl Into<String>) {
+		self.push(s, color_of(PrintStyleEx::Unknown));
+	}
+
+	fn error(&mut self, s: impl Into<String>) {
+		self.push(s, color_of(PrintStyleEx::Error));
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// Rendering methods for various pieces of code
+// ------------------------------------------------------------------------------------------------
+
+impl FunctionData {
+	fn render_to(self, r: &mut SpanRenderer) {
+		if self.name.is_empty() {
+			return;
+		}
+
+		r.comment(
+			"; ------------------------------------------------------------------------------\n");
+
+		if self.is_piece {
+			r.comment(format!("; (Piece of function {})\n", self.name));
+		} else {
+			r.comment(format!("; Function {}\n", self.name));
+
+			if !self.attrs.is_empty() {
+				r.comment(format!("; Attributes: {}\n", self.attrs));
+			}
+
+			if !self.entrypoints.is_empty() {
+				r.comment(format!("; Entry points: {}\n", self.entrypoints));
+			}
+		}
+	}
+}
+
+struct CodeLabel(String);
+
+impl CodeLabel {
+	fn render_to(self, r: &mut SpanRenderer) {
+		if !self.0.is_empty() {
+			r.label(format!("                   {}", self.0));
+			r.plain(":\n");
+		}
+	}
+}
+
+impl TextEA {
+	fn render_to(self, r: &mut SpanRenderer) {
+		r.seg_name(self.seg);
+		r.plain(format!(":{}", self.offs));
+	}
+}
+
+struct CodeBytes(String);
+
+impl CodeBytes {
+	fn render_to(self, r: &mut SpanRenderer) {
+		r.code_bytes(format!(" {:8}     ", self.0));
+	}
+}
+
+impl CodeText {
+	fn render_to(self, r: &mut SpanRenderer, bb_ea: EA, instn: usize) {
+		if let Some(opn) = self.opn {
+			r.push_link(self.text, color_of(self.style), CodeLink::Operand {
+				bb_ea,
+				instn,
+				opn: opn.into()
+			});
+		} else {
+			r.push(self.text, color_of(self.style));
 		}
 	}
 }
 
 impl BasicBlockData {
-	fn render(&self) -> Vec<TextSpan<'static, CodeLink>> {
-		let mut spans = Vec::new();
+	fn render(self) -> Vec<TextSpan<'static, CodeLink>> {
+		let mut r = SpanRenderer::new();
 
 		// TODO: inrefs
 		// TODO: MMU state
 
 		// function name, attrs, entry points
-		if !self.func.name.is_empty() {
-			spans.push(span(
-				"; ------------------------------------------------------------------------------\n"
-				.to_string()).color(color!(0x00AF00)));
-
-			if self.func.is_piece {
-				spans.push(span(format!("; (Piece of function {})\n", self.func.name))
-					.color(color!(0x00AF00)));
-			} else {
-				spans.push(span(format!("; Function {}\n", self.func.name))
-					.color(color!(0x00AF00)));
-
-				if !self.func.attrs.is_empty() {
-					spans.push(span(format!("; Attributes: {}\n", self.func.attrs))
-						.color(color!(0x00AF00)));
-				}
-
-				if !self.func.entrypoints.is_empty() {
-					spans.push(span(format!("; Entry points: {}\n", self.func.entrypoints))
-						.color(color!(0x00AF00)));
-				}
-			}
-		}
+		self.func.render_to(&mut r);
 
 		// label
-		if !self.label.is_empty() {
-			spans.push(span(format!("                   {}", self.label.clone()))
-				.color(color!(0xA06000)));
-			spans.push(span(":\n").color(color!(0xFFFFFF)));
-		}
+		CodeLabel(self.label).render_to(&mut r);
 
 		// lines of code
-		for (i, line) in self.lines.iter().enumerate() {
+		for (i, line) in self.lines.into_iter().enumerate() {
 			// seg:offs
-			spans.push(span(line.ea.seg.clone()).color(color!(0xFFFF00)));
-			spans.push(span(":").color(color!(0xFFFFFF)));
-			spans.push(span(line.ea.offs.clone()).color(color!(0xFFFFFF)));
+			line.ea.render_to(&mut r);
 
 			// bytes
-			spans.push(span(format!(" {:8}     ", line.bytes)).color(color!(0x8080FF)));
+			CodeBytes(line.bytes).render_to(&mut r);
 
 			// mnemonic
-			spans.push(span(line.mnemonic.clone()).color(color!(0xFF0000)));
-			spans.push(span(" "));
+			r.mnemonic(line.mnemonic);
+			r.plain(" ");
 
 			// operands
-			for op in line.operands.iter() {
-				let mut span = span(op.text.clone()).color(op.style.color());
-
-				if let Some(opn) = op.opn {
-					span = span.link(CodeLink::Operand {
-						bb_ea: self.ea, instn: i, opn: opn.into() })
-				}
-
-				spans.push(span);
+			for op in line.operands.into_iter() {
+				op.render_to(&mut r, self.ea, i);
 			}
 
-			spans.push(span("\n"));
+			r.plain("\n");
 		}
 
-		spans.push(span("\n"));
-		spans
+		r.plain("\n");
+		r.finish()
 	}
 }
 
 impl UnknownData {
-	fn render(&self) -> Vec<TextSpan<'static, CodeLink>> {
-		let mut spans = Vec::new();
+	fn render(self) -> Vec<TextSpan<'static, CodeLink>> {
+		let mut r = SpanRenderer::new();
 
-		for line in self.lines.iter() {
+		for line in self.lines.into_iter() {
 			// seg:offs
-			spans.push(span(line.ea.seg.clone()).color(color!(0xFFFF00)));
-			spans.push(span(":").color(color!(0xFFFFFF)));
-			spans.push(span(line.ea.offs.clone()).color(color!(0xFFFFFF)));
+			line.ea.render_to(&mut r);
 
 			// bytes
-			spans.push(span(format!(" {}\n", line.bytes)).color(color!(0xFF7F00)));
+			r.unknown_bytes(format!(" {}\n", line.bytes));
 		}
 
-		spans.push(span("\n"));
-		spans
+		r.plain("\n");
+		r.finish()
 	}
 }
 
 impl CodeViewItem {
-	fn render(&self) -> Vec<TextSpan<'static, CodeLink>> {
+	fn render(self) -> Vec<TextSpan<'static, CodeLink>> {
 		match self {
 			CodeViewItem::BasicBlock(bb) => bb.render(),
-			CodeViewItem::DataItem =>
-				vec![span("AAAAAAAA DATA UNIMPLEMENTED").color(color!(0xFF0000))],
+			CodeViewItem::DataItem => {
+				// TODO:
+				let mut r = SpanRenderer::new();
+				r.error("AAAAAAAA DATA UNIMPLEMENTED");
+				r.finish()
+			}
 			CodeViewItem::Unknown(unk) => unk.render(),
 		}
 	}
@@ -432,6 +568,7 @@ impl CodePane {
 				container(Rich::with_spans(self.seg.render_span(ea).render())
 					.on_link_click(CodeLink::into_message)
 					.font(CONSOLAS_FONT.bold())
+					.wrapping(iced::widget::text::Wrapping::None)
 				)
 				.width(Length::Fill)
 				// .style(move |_theme| {
