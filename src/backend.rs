@@ -585,18 +585,18 @@ impl SpanMapListener for SegmentListener {
 		self.event_tx.send(BackendEvent::SegmentChanged {
 			ea: EA::new(self.id, offs),
 			ev: SegmentChangedEvent::Add
-		});
+		}).expect("UI thread crashed??");
 	}
 	fn span_removed(&self, offs: usize) {
 		self.event_tx.send(BackendEvent::SegmentChanged {
 			ea: EA::new(self.id, offs),
 			ev: SegmentChangedEvent::Remove
-		});
+		}).expect("UI thread crashed??");
 	}
 	fn span_changed(&self, offs: usize) {
 		self.event_tx.send(BackendEvent::SegmentChanged {
 			ea: EA::new(self.id, offs),
 			ev: SegmentChangedEvent::Change
-		});
+		}).expect("UI thread crashed??");
 	}
 }
