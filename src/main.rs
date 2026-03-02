@@ -2,12 +2,11 @@
 
 use std::cell::{ RefCell };
 use std::rc::{ Rc };
-use std::fmt::{ Display, Formatter, Result as FmtResult };
-use std::collections::{ BTreeMap };
 
 use iced::{
-	Element, Font, Length, Padding, Task, Color as IcedColor, color,
+	Element, Font, Length, Padding, Task, Color as IcedColor, color, Subscription,
 	font::{ Weight },
+	time::{ self, milliseconds },
 	widget::{
 		column, row, span, container, scrollable, button, space, pick_list,
 
@@ -57,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	setup_panic();
 	iced::application(AdiFE::init, AdiFE::update, AdiFE::view)
 		.font(CONSOLAS_BYTES)
+		.subscription(AdiFE::subscriptions)
 		.run()?;
 	Ok(())
 }
@@ -118,6 +118,7 @@ enum Message {
 	JumpToTop,
 	JumpToBottom,
 	Scroll { up: bool },
+	CheckForEvents,
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -454,28 +455,16 @@ impl SegmentView {
 		self.backend.get_span_before(ea).map(|span| span.start())
 	}
 
-	// fn insert(&mut self, idx: usize, val: Span) -> Option<Span> {
-	// 	let ret = self.spans.insert(idx, val);
-
-	// 	match ret {
-	// 		None => self.changes.borrow_mut().push(ListChange::Added { idx }),
-	// 		Some(ref old) if *old != val =>
-	// 			self.changes.borrow_mut().push(ListChange::Changed { idx }),
-	// 		_ => {}
-	// 	}
-
-	// 	ret
-	// }
-
-	// fn remove(&mut self, idx: usize) -> bool {
-	// 	let ret = self.spans.remove(&idx).is_some();
-
-	// 	if ret {
-	// 		self.changes.borrow_mut().push(ListChange::Removed { idx });
-	// 	}
-
-	// 	ret
-	// }
+	fn dispatch_event(&self, ea: EA, ev: SegmentChangedEvent) {
+		if ea.seg() == self.id {
+			use SegmentChangedEvent::*;
+			match ev {
+				Add    => self.changes.borrow_mut().push(ListChange::Added   { idx: ea.offs() }),
+				Remove => self.changes.borrow_mut().push(ListChange::Removed { idx: ea.offs() }),
+				Change => self.changes.borrow_mut().push(ListChange::Changed { idx: ea.offs() }),
+			}
+		}
+	}
 }
 
 impl<'a> IContent<'a, EA> for SegmentView {
@@ -506,7 +495,6 @@ impl<'a> IContent<'a, EA> for SegmentView {
 		Box::new(SpansAfter { seg: self, ea: EA::new(self.id, idx) })
 	}
 
-	// TODO: changes!!!!!
 	fn changes(&self) -> Vec<ListChange> {
 		self.changes.take()
 	}
@@ -566,6 +554,10 @@ impl CodePane {
 
 	fn set_segment(&mut self, id: SegId) {
 		self.seg = SegmentView::new(id, self.seg.backend.clone());
+	}
+
+	fn dispatch_event(&self, ea: EA, ev: SegmentChangedEvent) {
+		self.seg.dispatch_event(ea, ev);
 	}
 
 	fn view(&self) -> PaneContent<'_, Message> {
@@ -732,6 +724,10 @@ impl AdiFE {
 		Self { backend: backend.clone(), panes, name_pane, code_pane }
 	}
 
+	fn subscriptions(&self) -> Subscription<Message> {
+		time::every(milliseconds(300)).map(|_| Message::CheckForEvents)
+	}
+
 	fn code_pane(&self) -> &CodePane {
 		self.panes.get(self.code_pane).unwrap().as_code()
 	}
@@ -741,8 +737,6 @@ impl AdiFE {
 	}
 
 	fn update(&mut self, message: Message) -> Task<Message> {
-		// TODO: backend.pending_events()!
-
 		match message {
 			Message::PaneDragged(de) => {
 				println!("TODO: dragged {:?}", de);
@@ -795,6 +789,25 @@ impl AdiFE {
 					x: 0.0,
 					y: if up { -20.0 } else { 20.0 },
 				});
+			}
+			Message::CheckForEvents => {
+				for event in self.backend.pending_events() {
+					use BackendEvent::*;
+
+					match event {
+						SegmentChanged { ea, ev } => {
+							self.code_pane().dispatch_event(ea, ev);
+						}
+
+						AutoAnalysisStatus { running } => {
+							if running {
+								println!("TODO: auto-analysis started");
+							} else {
+								println!("TODO: auto-analysis ended");
+							}
+						}
+					}
+				}
 			}
 		}
 

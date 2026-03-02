@@ -8,7 +8,7 @@ use std::thread::{ Builder as ThreadBuilder };
 use log::*;
 use oneshot::{ Sender as OneshotSender, channel as oneshot_channel };
 
-use adi::{ EA, VA, SegId, PlatformResult, SpanIdx, Image, Program, Span, SpanKind, ImageSliceable,
+use adi::{ EA, VA, SegId, PlatformResult, Image, Program, Span, SpanKind, ImageSliceable,
 	BasicBlock, DataItem, IPrintOutput, PrintStyle, FmtResult, Type };
 
 use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
@@ -22,10 +22,10 @@ use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
 #[non_exhaustive]
 #[derive(Debug, Copy, Clone)]
 pub enum SegmentChangedEvent {
-	/// This is a new span. `new_num_spans` is how many spans are in the span map now.
-	Add { new_num_spans: usize },
-	/// The span was deleted. `new_num_spans` is how many spans are in the span map now.
-	Remove { new_num_spans: usize },
+	/// This is a new span.
+	Add,
+	/// The span was deleted.
+	Remove,
 	/// An existing span was changed in some way.
 	Change,
 }
@@ -42,8 +42,6 @@ pub enum BackendEvent {
 		// TODO: is this EA needed? well the segment ID is, at least.
 		/// The EA of the span which changed.
 		ea: EA,
-		/// The 0-based index of the span which changed.
-		idx: SpanIdx,
 		/// What kind of change it was.
 		ev: SegmentChangedEvent,
 	},
@@ -77,13 +75,6 @@ pub enum BackendCommand {
 
 	/// Gets the number of spans in `seg`. Responds with a `usize`.
 	GetNumSpans { seg: SegId, tx: OneshotSender<usize> },
-
-	/// Gets the EAs for a range of spans in `seg`, whose 0-based indexes are
-	/// `[start_idx, end_idx)`. Responds with a `Vec<EA>`, one for each span.
-	GetSpanRangeEAs { seg: SegId, start_idx: usize, end_idx: usize, tx: OneshotSender<Vec<EA>> },
-
-	/// Given an EA, get the index of the span in that segment's span map.
-	GetSpanIdxFromEA { ea: EA, tx: OneshotSender<SpanIdx> },
 
 	/// Renders a span at the given EA into a form displayable in the UI.
 	GetRenderedSpan { ea: EA, tx: OneshotSender<CodeViewItem> },
@@ -148,14 +139,6 @@ impl Backend {
 
 	pub fn get_num_spans(&self, seg: SegId) -> usize {
 		self.send_and_get(|tx| BackendCommand::GetNumSpans { seg, tx })
-	}
-
-	pub fn get_span_range_eas(&self, seg: SegId, start_idx: usize, end_idx: usize) -> Vec<EA> {
-		self.send_and_get(|tx| BackendCommand::GetSpanRangeEAs { seg, start_idx, end_idx, tx })
-	}
-
-	pub fn get_span_index_from_ea(&self, ea: EA) -> SpanIdx {
-		self.send_and_get(|tx| BackendCommand::GetSpanIdxFromEA { ea, tx })
 	}
 
 	pub fn get_rendered_span(&self, ea: EA) -> CodeViewItem {
@@ -244,22 +227,6 @@ impl BackendThread {
 					trace!("GetNumSpans {:?} => {}", seg, response);
 					respond(tx, response);
 				}
-				GetSpanRangeEAs { seg, start_idx, end_idx, tx } => {
-					trace!("GetSpanRangeEAs {:?}:[{}, {})", seg, start_idx, end_idx);
-					let response = prog.segment_from_id(seg)
-						.bracket_spans(SpanIdx(start_idx), SpanIdx(end_idx))
-						.map(|s: Span| s.start())
-						.collect();
-
-					respond(tx, response);
-				}
-				GetSpanIdxFromEA { ea, tx } => {
-					let response = prog.segment_from_ea(ea)
-						.span_idx_at_ea(ea);
-
-					trace!("GetSpanIdxFromEA {:?} => {:?}", ea, response);
-					respond(tx, response);
-				}
 				GetRenderedSpan { ea, tx } => {
 					trace!("GetRenderedSpan {:?}", ea);
 					let response = self.render_span(&prog, ea);
@@ -293,19 +260,16 @@ impl BackendThread {
 		self.event(BackendEvent::AutoAnalysisStatus { running });
 	}
 
-	fn segment_change_event(&self, ea: EA, idx: SpanIdx) {
-		self.event(BackendEvent::SegmentChanged { ea, idx,
-			ev: SegmentChangedEvent::Change });
+	fn segment_change_event(&self, ea: EA) {
+		self.event(BackendEvent::SegmentChanged { ea, ev: SegmentChangedEvent::Change });
 	}
 
-	fn segment_add_event(&self, ea: EA, idx: SpanIdx, new_num_spans: usize) {
-		self.event(BackendEvent::SegmentChanged { ea, idx,
-			ev: SegmentChangedEvent::Add { new_num_spans } });
+	fn segment_add_event(&self, ea: EA) {
+		self.event(BackendEvent::SegmentChanged { ea, ev: SegmentChangedEvent::Add });
 	}
 
-	fn segment_remove_event(&self, ea: EA, idx: SpanIdx, new_num_spans: usize) {
-		self.event(BackendEvent::SegmentChanged { ea, idx,
-			ev: SegmentChangedEvent::Remove { new_num_spans } });
+	fn segment_remove_event(&self, ea: EA) {
+		self.event(BackendEvent::SegmentChanged { ea, ev: SegmentChangedEvent::Remove });
 	}
 
 	fn event(&self, ev: BackendEvent) {

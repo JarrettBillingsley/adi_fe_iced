@@ -1,4 +1,5 @@
 
+- location history, back/forward buttons
 - separate text::Rich for each line of text?
 - make code lines more structured - column-based
 	- location (seg:offs)
