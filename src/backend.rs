@@ -9,7 +9,7 @@ use log::*;
 use oneshot::{ Sender as OneshotSender, channel as oneshot_channel };
 
 use adi::{ EA, VA, SegId, PlatformResult, Image, Program, Span, SpanKind, ImageSliceable,
-	BasicBlock, DataItem, IPrintOutput, PrintStyle, FmtResult, Type };
+	BasicBlock, DataItem, IPrintOutput, PrintStyle, FmtResult, Type, SpanMapListener };
 
 use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
 	CodeOpData, UnknownData, UnknownLineData, SegmentData, FunctionData };
@@ -90,6 +90,9 @@ pub enum BackendCommand {
 
 	/// Get a span after the given EA.
 	GetSpanAfter { ea: EA, tx: OneshotSender<Option<Span>> },
+
+	/// Analyze any pending items in the analysis queue.
+	AnalyzeQueue,
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -161,6 +164,10 @@ impl Backend {
 		self.send_and_get(|tx| BackendCommand::GetSpanAfter { ea, tx })
 	}
 
+	pub fn analyze_queue(&self) {
+		self.send(BackendCommand::AnalyzeQueue);
+	}
+
 	pub fn pending_events(&self) -> ChanTryIter<'_, BackendEvent> {
 		self.event_rx.try_iter()
 	}
@@ -187,6 +194,10 @@ struct BackendThread {
 
 impl BackendThread {
 	fn main_loop(self, mut prog: Program) {
+		for id in prog.all_segs().collect::<Vec<_>>().into_iter() {
+			let listener = Box::new(SegmentListener::new(&self.event_tx, id));
+			prog.segment_from_id_mut(id).attach_listener(Some(listener));
+		}
 
 		let state = prog.initial_mmu_state();
 		prog.enqueue_new_func(state, prog.ea_from_name("VEC_RESET"));
@@ -195,7 +206,6 @@ impl BackendThread {
 		prog.new_data(Some("VEC_NMI_PTR"),   prog.ea_from_va(state, VA(0xFFFA)), ty.clone(), 2);
 		prog.new_data(Some("VEC_RESET_PTR"), prog.ea_from_va(state, VA(0xFFFC)), ty.clone(), 2);
 		prog.new_data(Some("VEC_IRQ_PTR"),   prog.ea_from_va(state, VA(0xFFFE)), ty.clone(), 2);
-		prog.analyze_queue();
 
 		for command in self.command_rx.iter() {
 			use BackendCommand::*;
@@ -251,6 +261,13 @@ impl BackendThread {
 					trace!("GetSpanSpan {:?}", ea);
 					let response = prog.segment_from_id(ea.seg()).span_after_ea(ea);
 					respond(tx, response);
+				}
+
+				AnalyzeQueue => {
+					trace!("AnalyzeQueue");
+					self.auto_analysis_status_event(true);
+					prog.analyze_queue();
+					self.auto_analysis_status_event(false);
 				}
 			}
 		}
@@ -542,5 +559,44 @@ impl IPrintOutput for UIRenderOutput {
 			_ => todo!("a new PrintStyle was added!"),
 		}
 		Ok(())
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// SegmentListener
+// ------------------------------------------------------------------------------------------------
+
+struct SegmentListener {
+	event_tx:   Sender<BackendEvent>,
+	id:         SegId,
+}
+
+impl SegmentListener {
+	fn new(event_tx: &Sender<BackendEvent>, id: SegId) -> Self {
+		Self {
+			event_tx: event_tx.clone(),
+			id,
+		}
+	}
+}
+
+impl SpanMapListener for SegmentListener {
+	fn span_added(&self, offs: usize) {
+		self.event_tx.send(BackendEvent::SegmentChanged {
+			ea: EA::new(self.id, offs),
+			ev: SegmentChangedEvent::Add
+		});
+	}
+	fn span_removed(&self, offs: usize) {
+		self.event_tx.send(BackendEvent::SegmentChanged {
+			ea: EA::new(self.id, offs),
+			ev: SegmentChangedEvent::Remove
+		});
+	}
+	fn span_changed(&self, offs: usize) {
+		self.event_tx.send(BackendEvent::SegmentChanged {
+			ea: EA::new(self.id, offs),
+			ev: SegmentChangedEvent::Change
+		});
 	}
 }

@@ -119,6 +119,7 @@ enum Message {
 	JumpToBottom,
 	Scroll { up: bool },
 	CheckForEvents,
+	ForceAnalyze,
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -796,6 +797,7 @@ impl AdiFE {
 
 					match event {
 						SegmentChanged { ea, ev } => {
+							println!("segment changed {:?} {:?}", ea, ev);
 							self.code_pane().dispatch_event(ea, ev);
 						}
 
@@ -808,6 +810,9 @@ impl AdiFE {
 						}
 					}
 				}
+			}
+			Message::ForceAnalyze => {
+				self.backend.analyze_queue();
 			}
 		}
 
@@ -833,6 +838,8 @@ impl AdiFE {
 				button("^").on_press(Message::Scroll { up: true }),
 				space().width(10),
 				button("v").on_press(Message::Scroll { up: false }),
+				space().width(10),
+				button("Analyze").on_press(Message::ForceAnalyze),
 			]
 		].into()
 	}

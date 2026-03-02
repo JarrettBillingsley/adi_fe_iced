@@ -1,4 +1,7 @@
 
+- when autoanalysis starts, lock and stop dispatching events to code view
+	- remember *if* any segment changed events came in for it
+	- then when autoanalysis ends, if any did, just have it refresh
 - location history, back/forward buttons
 - separate text::Rich for each line of text?
 - make code lines more structured - column-based
