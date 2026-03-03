@@ -1,4 +1,4 @@
-#![allow(unused)]
+// #![allow(unused)]
 
 use std::cell::{ RefCell };
 use std::rc::{ Rc };
@@ -40,7 +40,6 @@ use native_dialog::{ DialogBuilder };
 // ------------------------------------------------------------------------------------------------
 
 mod backend;
-mod backend_macros;
 mod sparse_list;
 mod ui;
 
@@ -401,7 +400,7 @@ impl CodeViewItem {
 // ------------------------------------------------------------------------------------------------
 
 struct NamesPane {
-	names: Vec<(EA, String)>,
+	names: Vec<NameListData>,
 }
 
 impl NamesPane {
@@ -412,7 +411,7 @@ impl NamesPane {
 	}
 
 	fn view(&self) -> PaneContent<'_, Message> {
-		let ui = scrollable(column(self.names.iter().map(|(ea, name)| {
+		let ui = scrollable(column(self.names.iter().map(|NameListData { ea, name }| {
 			button(text(name).font(CONSOLAS_FONT.bold()))
 				.style(button::text)
 				.on_press(Message::JumpTo { ea: *ea })
@@ -709,6 +708,7 @@ fn create_backend() -> Rc<Backend> {
 struct AdiFE {
 	backend: Rc<Backend>,
 	panes: PaneState<PaneKind>,
+	#[allow(dead_code)] // TODO: temporary
 	name_pane: Pane,
 	code_pane: Pane,
 }

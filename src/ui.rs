@@ -60,10 +60,6 @@ impl CodeOpData {
 	pub fn new_plain(text: impl Into<String>) -> Self {
 		Self::new(text, None, None)
 	}
-
-	pub fn is_empty(&self) -> bool {
-		self.text.is_empty()
-	}
 }
 
 /// Data for a single line of rendered code inside a basic block.
