@@ -40,6 +40,7 @@ use native_dialog::{ DialogBuilder };
 // ------------------------------------------------------------------------------------------------
 
 mod backend;
+mod backend_macros;
 mod sparse_list;
 mod ui;
 

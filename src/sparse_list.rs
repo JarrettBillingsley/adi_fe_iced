@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-// #![allow(unused)]
 
 //! Horrifying amalgamation of iced/list-widget-reloaded's List, and iced's Scrollable.
 //! Scrollable list of items which are dynamically instantiated, whose indexes are ordered but

@@ -1,11 +1,10 @@
-#![allow(unused)]
 
 use std::fmt::{ Write as FmtWrite };
 use std::sync::{ Arc, OnceLock };
 use std::sync::mpsc::{ Sender, Receiver, channel, TryIter as ChanTryIter };
 use std::thread::{ Builder as ThreadBuilder };
 
-use log::*;
+// use log::*;
 use oneshot::{ Sender as OneshotSender, channel as oneshot_channel };
 
 use adi::{ EA, VA, SegId, PlatformResult, Image, Program, Span, SpanKind, ImageSliceable,
@@ -13,6 +12,66 @@ use adi::{ EA, VA, SegId, PlatformResult, Image, Program, Span, SpanKind, ImageS
 
 use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
 	CodeOpData, UnknownData, UnknownLineData, SegmentData, FunctionData };
+
+use crate::backend_macros::*;
+
+export_backend_commands! {
+	as backend_command_tokens,
+
+	[self prog]
+
+	// `self` is a bit of an oddity in macros. It's annoying to parse. To make that easier, I just
+	// required it to be treated like any other argument, so it'll take the form `self: Type`
+
+	pub fn get_all_names(self: &Self) -> Vec<(EA, String)> {
+		prog.all_names_by_ea()
+			.map(|(ea, name)| (*ea, name.clone()))
+			.collect::<Vec<(EA, String)>>()
+	}
+
+	pub fn get_all_segments(self: &Self) -> Vec<SegmentData> {
+		prog.all_segs()
+		.map(|segid| {
+			let seg = prog.segment_from_id(segid);
+			SegmentData {
+				segid,
+				name:     seg.name().into(),
+				is_image: seg.image().is_some(),
+			}
+		})
+		.collect()
+	}
+
+	pub fn get_num_spans(self: &Self, seg: SegId) -> usize {
+		prog.segment_from_id(seg).num_spans()
+	}
+
+	pub fn get_rendered_span(self: &Self, ea: EA) -> CodeViewItem {
+		self.render_span(&prog, ea)
+	}
+
+	pub fn get_last_span_offset(self: &Self, seg: SegId) -> usize {
+		prog.segment_from_id(seg).last_span_offset()
+	}
+
+	pub fn get_span(self: &Self, ea: EA) -> Span {
+		prog.segment_from_id(ea.seg()).span_at_ea(ea)
+	}
+
+	pub fn get_span_before(self: &Self, ea: EA) -> Option<Span> {
+		prog.segment_from_id(ea.seg()).span_before_ea(ea)
+	}
+
+	pub fn get_span_after(self: &Self, ea: EA) -> Option<Span> {
+		prog.segment_from_id(ea.seg()).span_after_ea(ea)
+	}
+
+	pub fn analyze_queue(self: &Self) {
+		self.auto_analysis_status_event(true);
+		prog.analyze_queue();
+		self.auto_analysis_status_event(false);
+	}
+}
 
 // ------------------------------------------------------------------------------------------------
 // BackendEvent
@@ -55,45 +114,7 @@ pub enum BackendEvent {
 // BackendCommand
 // ------------------------------------------------------------------------------------------------
 
-// TO ADD A NEW BackendCommand:
-// - new variant (with a tx: OneshotSender<T> if it has a response)
-// - new method in Backend
-// - new match arm in BackendThread::main_loop
-/// Things the frontend can tell the backend to do.
-///
-/// `Get___` commands will respond instantly.
-///
-/// Other commands may take a while, and may generate [`BackendEvent`]s.
-#[non_exhaustive]
-#[derive(Debug)]
-pub enum BackendCommand {
-	/// Get all names. Responds with a `Vec<(EA, String)>`.
-	GetAllNames { tx: OneshotSender<Vec<(EA, String)>> },
-
-	/// Get all segments. Responds with a `Vec<SegmentData>`.
-	GetAllSegments { tx: OneshotSender<Vec<SegmentData>> },
-
-	/// Gets the number of spans in `seg`. Responds with a `usize`.
-	GetNumSpans { seg: SegId, tx: OneshotSender<usize> },
-
-	/// Renders a span at the given EA into a form displayable in the UI.
-	GetRenderedSpan { ea: EA, tx: OneshotSender<CodeViewItem> },
-
-	/// Get the offset of the last span in `seg`.
-	GetLastSpanOffset { seg: SegId, tx: OneshotSender<usize> },
-
-	/// Get a span at the given EA.
-	GetSpan { ea: EA, tx: OneshotSender<Span> },
-
-	/// Get a span before the given EA.
-	GetSpanBefore { ea: EA, tx: OneshotSender<Option<Span>> },
-
-	/// Get a span after the given EA.
-	GetSpanAfter { ea: EA, tx: OneshotSender<Option<Span>> },
-
-	/// Analyze any pending items in the analysis queue.
-	AnalyzeQueue,
-}
+invoke_with_tokens!(backend_command_enum, backend_command_tokens);
 
 // ------------------------------------------------------------------------------------------------
 // Backend
@@ -115,7 +136,7 @@ impl Backend {
 		let success_clone = success.clone();
 
 		ThreadBuilder::new().name("backend thread".into()).spawn(move || {
-			let mut prog = match adi::program_from_image(image) {
+			let prog = match adi::program_from_image(image) {
 				Ok(prog) => {
 					success_clone.set(Ok(())).unwrap();
 					prog
@@ -130,42 +151,6 @@ impl Backend {
 		}).expect("failed to spawn backend thread!");
 
 		success.wait().clone().map(|_| Self { event_rx, command_tx })
-	}
-
-	pub fn get_all_names(&self) -> Vec<(EA, String)> {
-		self.send_and_get(|tx| BackendCommand::GetAllNames { tx })
-	}
-
-	pub fn get_all_segments(&self) -> Vec<SegmentData> {
-		self.send_and_get(|tx| BackendCommand::GetAllSegments { tx })
-	}
-
-	pub fn get_num_spans(&self, seg: SegId) -> usize {
-		self.send_and_get(|tx| BackendCommand::GetNumSpans { seg, tx })
-	}
-
-	pub fn get_rendered_span(&self, ea: EA) -> CodeViewItem {
-		self.send_and_get(|tx| BackendCommand::GetRenderedSpan { ea, tx })
-	}
-
-	pub fn get_last_span_offset(&self, seg: SegId) -> usize {
-		self.send_and_get(|tx| BackendCommand::GetLastSpanOffset { seg, tx })
-	}
-
-	pub fn get_span(&self, ea: EA) -> Span {
-		self.send_and_get(|tx| BackendCommand::GetSpan { ea, tx })
-	}
-
-	pub fn get_span_before(&self, ea: EA) -> Option<Span> {
-		self.send_and_get(|tx| BackendCommand::GetSpanBefore { ea, tx })
-	}
-
-	pub fn get_span_after(&self, ea: EA) -> Option<Span> {
-		self.send_and_get(|tx| BackendCommand::GetSpanAfter { ea, tx })
-	}
-
-	pub fn analyze_queue(&self) {
-		self.send(BackendCommand::AnalyzeQueue);
 	}
 
 	pub fn pending_events(&self) -> ChanTryIter<'_, BackendEvent> {
@@ -183,6 +168,8 @@ impl Backend {
 	}
 }
 
+invoke_with_tokens!(backend_command_methods, backend_command_tokens);
+
 // ------------------------------------------------------------------------------------------------
 // BackendThread
 // ------------------------------------------------------------------------------------------------
@@ -191,6 +178,8 @@ struct BackendThread {
 	event_tx:   Sender<BackendEvent>,
 	command_rx: Receiver<BackendCommand>,
 }
+
+invoke_with_tokens!(backend_thread_command_loop, backend_command_tokens);
 
 impl BackendThread {
 	fn main_loop(self, mut prog: Program) {
@@ -206,87 +195,11 @@ impl BackendThread {
 		prog.new_data(Some("VEC_NMI_PTR"),   prog.ea_from_va(state, VA(0xFFFA)), ty.clone(), 2);
 		prog.new_data(Some("VEC_RESET_PTR"), prog.ea_from_va(state, VA(0xFFFC)), ty.clone(), 2);
 		prog.new_data(Some("VEC_IRQ_PTR"),   prog.ea_from_va(state, VA(0xFFFE)), ty.clone(), 2);
-
-		for command in self.command_rx.iter() {
-			use BackendCommand::*;
-			match command {
-				GetAllNames { tx } => {
-					trace!("GetAllNames");
-
-					let response = prog.all_names_by_ea()
-						.map(|(ea, name)| (*ea, name.clone()))
-						.collect();
-					respond(tx, response);
-				}
-				GetAllSegments { tx } => {
-					trace!("GetAllSegments");
-					let response = prog.all_segs()
-						.map(|segid| {
-							let seg = prog.segment_from_id(segid);
-							SegmentData {
-								segid,
-								name:     seg.name().into(),
-								is_image: seg.image().is_some(),
-							}
-						})
-						.collect();
-					respond(tx, response);
-				}
-				GetNumSpans { seg, tx } => {
-					let response = prog.segment_from_id(seg).num_spans();
-					trace!("GetNumSpans {:?} => {}", seg, response);
-					respond(tx, response);
-				}
-				GetRenderedSpan { ea, tx } => {
-					trace!("GetRenderedSpan {:?}", ea);
-					let response = self.render_span(&prog, ea);
-					respond(tx, response);
-				}
-				GetLastSpanOffset { seg, tx } => {
-					trace!("GetLastSpanOffset {:?}", seg);
-					let response = prog.segment_from_id(seg).last_span_offset();
-					respond(tx, response);
-				}
-				GetSpan { ea, tx } => {
-					trace!("GetSpanSpan {:?}", ea);
-					let response = prog.segment_from_id(ea.seg()).span_at_ea(ea);
-					respond(tx, response);
-				}
-				GetSpanBefore { ea, tx } => {
-					trace!("GetSpanSpan {:?}", ea);
-					let response = prog.segment_from_id(ea.seg()).span_before_ea(ea);
-					respond(tx, response);
-				}
-				GetSpanAfter { ea, tx } => {
-					trace!("GetSpanSpan {:?}", ea);
-					let response = prog.segment_from_id(ea.seg()).span_after_ea(ea);
-					respond(tx, response);
-				}
-
-				AnalyzeQueue => {
-					trace!("AnalyzeQueue");
-					self.auto_analysis_status_event(true);
-					prog.analyze_queue();
-					self.auto_analysis_status_event(false);
-				}
-			}
-		}
+		self.command_loop(prog);
 	}
 
 	fn auto_analysis_status_event(&self, running: bool) {
 		self.event(BackendEvent::AutoAnalysisStatus { running });
-	}
-
-	fn segment_change_event(&self, ea: EA) {
-		self.event(BackendEvent::SegmentChanged { ea, ev: SegmentChangedEvent::Change });
-	}
-
-	fn segment_add_event(&self, ea: EA) {
-		self.event(BackendEvent::SegmentChanged { ea, ev: SegmentChangedEvent::Add });
-	}
-
-	fn segment_remove_event(&self, ea: EA) {
-		self.event(BackendEvent::SegmentChanged { ea, ev: SegmentChangedEvent::Remove });
 	}
 
 	fn event(&self, ev: BackendEvent) {
@@ -306,12 +219,10 @@ impl BackendThread {
 
 	fn bb_func_differs_from_previous(&self, prog: &Program, bb: &BasicBlock) -> bool {
 		let seg = prog.segment_from_ea(bb.ea());
-		if let Some(span) = seg.span_before_ea(bb.ea()) {
-			if let Some(func) = prog.func_that_contains(span.start()) {
-				if func.id() != bb.func() {
-					return true;
-				}
-			}
+		if let Some(span) = seg.span_before_ea(bb.ea())
+		&& let Some(func) = prog.func_that_contains(span.start())
+		&& func.id() != bb.func() {
+			return true;
 		}
 
 		false
@@ -341,14 +252,14 @@ impl BackendThread {
 				};
 
 				FunctionData {
-					name: name.into(),
+					name,
 					is_piece: false,
-					attrs: attrs.into(),
-					entrypoints: entrypoints.into(),
+					attrs,
+					entrypoints,
 				}
 			} else {
 				FunctionData {
-					name: name.into(),
+					name,
 					is_piece: true,
 					..Default::default()
 				}
@@ -381,9 +292,9 @@ impl BackendThread {
 			let (mnemonic, operands) = output.finish();
 
 			ret.push(CodeLineData {
-				ea:    TextEA::new(seg_name, &prog.fmt_addr(inst.va().0)),
-				bytes: bytes.into(),
-				mnemonic: mnemonic.into(),
+				ea:    TextEA::new(seg_name, prog.fmt_addr(inst.va().0)),
+				bytes,
+				mnemonic,
 				operands,
 			});
 		}
@@ -400,14 +311,14 @@ impl BackendThread {
 		};
 
 		CodeViewItem::BasicBlock(BasicBlockData {
-			ea:    bb.ea().into(),
+			ea:    bb.ea(),
 			func:  func_header,
-			label: label.into(),
+			label,
 			lines: self.render_bb_code(prog, bb),
 		})
 	}
 
-	fn render_data(&self, prog: &Program, bb: &DataItem) -> CodeViewItem {
+	fn render_data(&self, _prog: &Program, _bb: &DataItem) -> CodeViewItem {
 		Default::default()
 	}
 
@@ -423,8 +334,8 @@ impl BackendThread {
 		let seg_name = seg.name();
 
 		let mut lines = vec![UnknownLineData {
-			ea:    TextEA::new(seg_name, &prog.fmt_addr(va.0)),
-			bytes: format!("[{} unexplored byte(s)]", span.len()).into()
+			ea:    TextEA::new(seg_name, prog.fmt_addr(va.0)),
+			bytes: format!("[{} unexplored byte(s)]", span.len())
 		}];
 
 		if seg.is_real() {
@@ -445,7 +356,7 @@ impl BackendThread {
 				addr = prog.fmt_addr(va.0 + i * UNK_STRIDE);
 				lines.push(UnknownLineData {
 					ea: TextEA::new(seg_name, &addr),
-					bytes: bytes.into(),
+					bytes,
 				});
 			}
 
