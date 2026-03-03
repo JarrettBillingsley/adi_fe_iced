@@ -75,13 +75,31 @@ pub struct CodeLineData {
 	pub operands: Vec<CodeOpData>,
 }
 
+/// Additional info about a function
+#[derive(Debug, Clone)]
+pub enum FuncDataKind {
+	/// This BB is the head of a function.
+	Head {
+		/// If `None`, has no attributes. Otherwise, the attributes as a string.
+		attrs: Option<String>,
+
+		/// If `None`, single-entry. Otherwise, a list of entrypoint names as a string.
+		entrypoints: Option<String>,
+	},
+
+	/// This BB is only a piece of a function, though it may be out-of-place (e.g. if it's part of
+	/// a non-consecutive function).
+	Piece,
+}
+
 /// Data about a function, to be put at the top of a function in the code listing.
-#[derive(Debug, Default, Clone)]
-pub struct FunctionData {
-	pub name:        String, // if "", don't output a function header.
-	pub is_piece:    bool,   // if true, output a function piece header including only the name.
-	pub attrs:       String, // if "", no attrs.
-	pub entrypoints: String, // if "", single_entry.
+#[derive(Debug, Clone)]
+pub struct FuncData {
+	/// Function's name.
+	pub name: String,
+
+	/// Additional info
+	pub kind: FuncDataKind,
 }
 
 /// Data for a single basic block of code.
@@ -90,7 +108,7 @@ pub struct BasicBlockData {
 	pub ea:    EA,
 	pub label: String,
 	pub lines: Vec<CodeLineData>,
-	pub func:  FunctionData,
+	pub func:  Option<FuncData>,
 }
 
 /// Data for a single line of unknown data.

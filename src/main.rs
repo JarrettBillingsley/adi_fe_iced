@@ -286,26 +286,29 @@ impl SpanRenderer {
 		self.push(format!(" {:8}     ", bytes), color_of(PrintStyleEx::CodeBytes))
 	}
 
-	fn func_data(&mut self, data: FunctionData) -> &mut Self {
-		if data.name.is_empty() {
+	fn func_data(&mut self, data: Option<FuncData>) -> &mut Self {
+		let Some(data) = data else {
 			return self;
-		}
+		};
 
 		self.comment(
 			"; ------------------------------------------------------------------------------")
 			.newline();
 
-		if data.is_piece {
-			self.comment(format!("; (Piece of function {})", data.name)).newline();
-		} else {
-			self.comment(format!("; Function {}", data.name)).newline();
-
-			if !data.attrs.is_empty() {
-				self.comment(format!("; Attributes: {}", data.attrs)).newline();
+		match data.kind {
+			FuncDataKind::Piece => {
+				self.comment(format!("; (Piece of function {})", data.name)).newline();
 			}
+			FuncDataKind::Head { attrs, entrypoints } => {
+				self.comment(format!("; Function {}", data.name)).newline();
 
-			if !data.entrypoints.is_empty() {
-				self.comment(format!("; Entry points: {}", data.entrypoints)).newline();
+				if let Some(attrs) = attrs {
+					self.comment(format!("; Attributes: {}", attrs)).newline();
+				}
+
+				if let Some(entrypoints) = entrypoints {
+					self.comment(format!("; Entry points: {}", entrypoints)).newline();
+				}
 			}
 		}
 

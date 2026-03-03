@@ -10,7 +10,7 @@ use adi::{ EA, VA, SegId, PlatformResult, Image, Program, Span, SpanKind, ImageS
 	BasicBlock, DataItem, IPrintOutput, PrintStyle, FmtResult, Type, SpanMapListener };
 
 use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
-	CodeOpData, UnknownData, UnknownLineData, SegmentData, FunctionData };
+	CodeOpData, UnknownData, UnknownLineData, SegmentData, FuncData, FuncDataKind };
 
 use crate::backend_macros::*;
 
@@ -294,43 +294,26 @@ fn bb_func_differs_from_previous(prog: &Program, bb: &BasicBlock) -> bool {
 
 // if this bb's function differs from the function (if any) that owns the previous span, we need
 // to show either a function header or a function piece header.
-fn render_bb_header(prog: &Program, bb: &BasicBlock) -> FunctionData {
+fn render_bb_header(prog: &Program, bb: &BasicBlock) -> Option<FuncData> {
 	let func = prog.get_func(bb.func());
 
-	if bb_func_differs_from_previous(prog, bb) {
-		let name = prog.name_of_ea(func.ea());
-
-		if bb.id() == func.head_id() {
-			let attrs = if !func.attrs().is_empty() {
-				format!("{:?}", func.attrs())
+	bb_func_differs_from_previous(prog, bb).then(|| {
+		FuncData {
+			name: prog.name_of_ea(func.ea()),
+			kind: if bb.id() == func.head_id() {
+				FuncDataKind::Head {
+					attrs: (!func.attrs().is_empty()).then(|| format!("{:?}", func.attrs())),
+					entrypoints: func.is_multi_entry().then(||
+					func.entrypoints().iter()
+						.map(|bbid| prog.name_of_ea(prog.get_bb(*bbid).ea()))
+						.collect::<Vec<_>>()
+						.join(", "))
+				}
 			} else {
-				"".to_string()
-			};
-			let entrypoints = if func.is_multi_entry() {
-				func.entrypoints().iter()
-					.map(|bbid| prog.name_of_ea(prog.get_bb(*bbid).ea()))
-					.collect::<Vec<_>>()
-					.join(", ")
-			} else {
-				"".to_string()
-			};
-
-			FunctionData {
-				name,
-				is_piece: false,
-				attrs,
-				entrypoints,
-			}
-		} else {
-			FunctionData {
-				name,
-				is_piece: true,
-				..Default::default()
+				FuncDataKind::Piece
 			}
 		}
-	} else {
-		Default::default()
-	}
+	})
 }
 
 fn render_bb_code(prog: &Program, bb: &BasicBlock) -> Vec<CodeLineData> {
