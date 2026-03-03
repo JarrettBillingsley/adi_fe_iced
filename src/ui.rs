@@ -107,10 +107,9 @@ pub struct UnknownData {
 }
 
 /// Kind of item in the code view.
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum CodeViewItem {
 	BasicBlock(BasicBlockData),
-	#[default]
 	DataItem, // TODO
 	Unknown(UnknownData),
 }

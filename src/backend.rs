@@ -4,7 +4,6 @@ use std::sync::{ Arc, OnceLock };
 use std::sync::mpsc::{ Sender, Receiver, channel, TryIter as ChanTryIter };
 use std::thread::{ Builder as ThreadBuilder };
 
-// use log::*;
 use oneshot::{ Sender as OneshotSender, channel as oneshot_channel };
 
 use adi::{ EA, VA, SegId, PlatformResult, Image, Program, Span, SpanKind, ImageSliceable,
@@ -14,64 +13,6 @@ use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
 	CodeOpData, UnknownData, UnknownLineData, SegmentData, FunctionData };
 
 use crate::backend_macros::*;
-
-export_backend_commands! {
-	as backend_command_tokens,
-
-	[self prog]
-
-	// `self` is a bit of an oddity in macros. It's annoying to parse. To make that easier, I just
-	// required it to be treated like any other argument, so it'll take the form `self: Type`
-
-	pub fn get_all_names(self: &Self) -> Vec<(EA, String)> {
-		prog.all_names_by_ea()
-			.map(|(ea, name)| (*ea, name.clone()))
-			.collect::<Vec<(EA, String)>>()
-	}
-
-	pub fn get_all_segments(self: &Self) -> Vec<SegmentData> {
-		prog.all_segs()
-		.map(|segid| {
-			let seg = prog.segment_from_id(segid);
-			SegmentData {
-				segid,
-				name:     seg.name().into(),
-				is_image: seg.image().is_some(),
-			}
-		})
-		.collect()
-	}
-
-	pub fn get_num_spans(self: &Self, seg: SegId) -> usize {
-		prog.segment_from_id(seg).num_spans()
-	}
-
-	pub fn get_rendered_span(self: &Self, ea: EA) -> CodeViewItem {
-		self.render_span(&prog, ea)
-	}
-
-	pub fn get_last_span_offset(self: &Self, seg: SegId) -> usize {
-		prog.segment_from_id(seg).last_span_offset()
-	}
-
-	pub fn get_span(self: &Self, ea: EA) -> Span {
-		prog.segment_from_id(ea.seg()).span_at_ea(ea)
-	}
-
-	pub fn get_span_before(self: &Self, ea: EA) -> Option<Span> {
-		prog.segment_from_id(ea.seg()).span_before_ea(ea)
-	}
-
-	pub fn get_span_after(self: &Self, ea: EA) -> Option<Span> {
-		prog.segment_from_id(ea.seg()).span_after_ea(ea)
-	}
-
-	pub fn analyze_queue(self: &Self) {
-		self.auto_analysis_status_event(true);
-		prog.analyze_queue();
-		self.auto_analysis_status_event(false);
-	}
-}
 
 // ------------------------------------------------------------------------------------------------
 // BackendEvent
@@ -89,16 +30,12 @@ pub enum SegmentChangedEvent {
 	Change,
 }
 
-// TO ADD A NEW BackendEvent:
-// - enum variant
-// - method in BackendThread
 /// Kinds of events the backend can notify the frontend of.
 #[non_exhaustive]
 #[derive(Copy, Clone)]
 pub enum BackendEvent {
 	/// A segment's span map changed.
 	SegmentChanged {
-		// TODO: is this EA needed? well the segment ID is, at least.
 		/// The EA of the span which changed.
 		ea: EA,
 		/// What kind of change it was.
@@ -109,12 +46,6 @@ pub enum BackendEvent {
 	/// commands until the automatic analysis ends.
 	AutoAnalysisStatus { running: bool },
 }
-
-// ------------------------------------------------------------------------------------------------
-// BackendCommand
-// ------------------------------------------------------------------------------------------------
-
-invoke_with_tokens!(backend_command_enum, backend_command_tokens);
 
 // ------------------------------------------------------------------------------------------------
 // Backend
@@ -157,18 +88,18 @@ impl Backend {
 		self.event_rx.try_iter()
 	}
 
+	// used by the methods declared by "invoke_with_tokens!(backend_command_methods..." below
 	fn send_and_get<Ret>(&self, f: impl FnOnce(OneshotSender<Ret>) -> BackendCommand) -> Ret {
 		let (tx, rx) = oneshot_channel();
 		self.send(f(tx));
 		rx.recv().expect("backend crashed??")
 	}
 
+	// used by the methods declared by "invoke_with_tokens!(backend_command_methods..." below
 	fn send(&self, cmd: BackendCommand) {
 		self.command_tx.send(cmd).expect("backend crashed??");
 	}
 }
-
-invoke_with_tokens!(backend_command_methods, backend_command_tokens);
 
 // ------------------------------------------------------------------------------------------------
 // BackendThread
@@ -179,15 +110,13 @@ struct BackendThread {
 	command_rx: Receiver<BackendCommand>,
 }
 
-invoke_with_tokens!(backend_thread_command_loop, backend_command_tokens);
+fn respond<T>(tx: OneshotSender<T>, response: T) {
+	tx.send(response).expect("UI thread crashed??");
+}
 
 impl BackendThread {
 	fn main_loop(self, mut prog: Program) {
-		for id in prog.all_segs().collect::<Vec<_>>().into_iter() {
-			let listener = Box::new(SegmentListener::new(&self.event_tx, id));
-			prog.segment_from_id_mut(id).attach_listener(Some(listener));
-		}
-
+		// TODO: temporary
 		let state = prog.initial_mmu_state();
 		prog.enqueue_new_func(state, prog.ea_from_name("VEC_RESET"));
 		prog.enqueue_new_func(state, prog.ea_from_name("VEC_NMI"));
@@ -195,17 +124,145 @@ impl BackendThread {
 		prog.new_data(Some("VEC_NMI_PTR"),   prog.ea_from_va(state, VA(0xFFFA)), ty.clone(), 2);
 		prog.new_data(Some("VEC_RESET_PTR"), prog.ea_from_va(state, VA(0xFFFC)), ty.clone(), 2);
 		prog.new_data(Some("VEC_IRQ_PTR"),   prog.ea_from_va(state, VA(0xFFFE)), ty.clone(), 2);
-		self.command_loop(prog);
-	}
+		prog.analyze_queue();
 
-	fn auto_analysis_status_event(&self, running: bool) {
-		self.event(BackendEvent::AutoAnalysisStatus { running });
+		// set these up *after* the initial analysis so as not to flood the UI with events.
+		// (this is to avoid having a simultaneous mutable and immutable borrow on prog)
+		for id in prog.all_segs().collect::<Vec<_>>().into_iter() {
+			let listener = Box::new(SegmentListener::new(&self.event_tx, id));
+			prog.segment_from_id_mut(id).attach_listener(Some(listener));
+		}
+
+		// this method is defined by "invoke_with_tokens!(backend_thread_command_loop..." below
+		self.command_loop(prog);
 	}
 
 	fn event(&self, ev: BackendEvent) {
 		self.event_tx.send(ev).expect("UI thread crashed??");
 	}
+}
 
+// ------------------------------------------------------------------------------------------------
+// SegmentListener
+// ------------------------------------------------------------------------------------------------
+
+struct SegmentListener {
+	event_tx:   Sender<BackendEvent>,
+	id:         SegId,
+}
+
+impl SegmentListener {
+	fn new(event_tx: &Sender<BackendEvent>, id: SegId) -> Self {
+		Self {
+			event_tx: event_tx.clone(),
+			id,
+		}
+	}
+}
+
+impl SpanMapListener for SegmentListener {
+	fn span_added(&self, offs: usize) {
+		self.event_tx.send(BackendEvent::SegmentChanged {
+			ea: EA::new(self.id, offs),
+			ev: SegmentChangedEvent::Add
+		}).expect("UI thread crashed??");
+	}
+	fn span_removed(&self, offs: usize) {
+		self.event_tx.send(BackendEvent::SegmentChanged {
+			ea: EA::new(self.id, offs),
+			ev: SegmentChangedEvent::Remove
+		}).expect("UI thread crashed??");
+	}
+	fn span_changed(&self, offs: usize) {
+		self.event_tx.send(BackendEvent::SegmentChanged {
+			ea: EA::new(self.id, offs),
+			ev: SegmentChangedEvent::Change
+		}).expect("UI thread crashed??");
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// Backend commands
+// ------------------------------------------------------------------------------------------------
+
+// These all become methods of `Backend`, but their code is run in `BackendThread::command_loop`.
+export_backend_commands! {
+	as backend_command_tokens,
+
+	[self prog]
+
+	// `self` is a bit of an oddity in macros. It's annoying to parse. To make that easier, I just
+	// required it to be treated like any other argument, so it'll take the form `self: Type`
+
+	/// Get all names. The returned vector is a tuple of each name's [`EA`] and the name itself.
+	pub fn get_all_names(self: &Self) -> Vec<(EA, String)> {
+		prog.all_names_by_ea()
+			.map(|(ea, name)| (*ea, name.clone()))
+			.collect::<Vec<(EA, String)>>()
+	}
+
+	/// Get information about all segments.
+	pub fn get_all_segments(self: &Self) -> Vec<SegmentData> {
+		prog.all_segs()
+		.map(|segid| {
+			let seg = prog.segment_from_id(segid);
+			SegmentData {
+				segid,
+				name:     seg.name().into(),
+				is_image: seg.image().is_some(),
+			}
+		})
+		.collect()
+	}
+
+	/// Gets the number of spans in `seg`.
+	pub fn get_num_spans(self: &Self, seg: SegId) -> usize {
+		prog.segment_from_id(seg).num_spans()
+	}
+
+	/// Renders a span at the given EA into a [`CodeViewItem`].
+	pub fn get_rendered_span(self: &Self, ea: EA) -> CodeViewItem {
+		self.render_span(&prog, ea)
+	}
+
+	/// Get the offset of the last span in `seg`.
+	pub fn get_last_span_offset(self: &Self, seg: SegId) -> usize {
+		prog.segment_from_id(seg).last_span_offset()
+	}
+
+	/// Get a span at the given EA.
+	pub fn get_span(self: &Self, ea: EA) -> Span {
+		prog.segment_from_id(ea.seg()).span_at_ea(ea)
+	}
+
+	/// Get a span before the given EA.
+	pub fn get_span_before(self: &Self, ea: EA) -> Option<Span> {
+		prog.segment_from_id(ea.seg()).span_before_ea(ea)
+	}
+
+	/// Get a span after the given EA.
+	pub fn get_span_after(self: &Self, ea: EA) -> Option<Span> {
+		prog.segment_from_id(ea.seg()).span_after_ea(ea)
+	}
+
+	/// Analyze any pending items in the analysis queue. This may a while, and will generate
+	/// [`BackendEvent`]s while it runs.
+	pub fn analyze_queue(self: &Self) {
+		self.event(BackendEvent::AutoAnalysisStatus { running: true });
+		prog.analyze_queue();
+		self.event(BackendEvent::AutoAnalysisStatus { running: false });
+	}
+}
+
+invoke_with_tokens!(backend_command_enum, backend_command_tokens);
+invoke_with_tokens!(backend_command_methods, backend_command_tokens);
+invoke_with_tokens!(backend_thread_command_loop, backend_command_tokens);
+
+// ------------------------------------------------------------------------------------------------
+// Rendering stuff
+// ------------------------------------------------------------------------------------------------
+
+impl BackendThread {
 	fn render_span(&self, prog: &Program, ea: EA) -> CodeViewItem {
 		let span = prog.span_at_ea(ea);
 
@@ -220,8 +277,8 @@ impl BackendThread {
 	fn bb_func_differs_from_previous(&self, prog: &Program, bb: &BasicBlock) -> bool {
 		let seg = prog.segment_from_ea(bb.ea());
 		if let Some(span) = seg.span_before_ea(bb.ea())
-		&& let Some(func) = prog.func_that_contains(span.start())
-		&& func.id() != bb.func() {
+			&& let Some(func) = prog.func_that_contains(span.start())
+			&& func.id() != bb.func() {
 			return true;
 		}
 
@@ -319,7 +376,7 @@ impl BackendThread {
 	}
 
 	fn render_data(&self, _prog: &Program, _bb: &DataItem) -> CodeViewItem {
-		Default::default()
+		CodeViewItem::DataItem
 	}
 
 	fn render_unk(&self, prog: &Program, span: &Span) -> CodeViewItem {
@@ -370,10 +427,6 @@ impl BackendThread {
 
 		CodeViewItem::Unknown(UnknownData { lines })
 	}
-}
-
-fn respond<T>(tx: OneshotSender<T>, response: T) {
-	tx.send(response).expect("UI thread crashed??");
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -470,44 +523,5 @@ impl IPrintOutput for UIRenderOutput {
 			_ => todo!("a new PrintStyle was added!"),
 		}
 		Ok(())
-	}
-}
-
-// ------------------------------------------------------------------------------------------------
-// SegmentListener
-// ------------------------------------------------------------------------------------------------
-
-struct SegmentListener {
-	event_tx:   Sender<BackendEvent>,
-	id:         SegId,
-}
-
-impl SegmentListener {
-	fn new(event_tx: &Sender<BackendEvent>, id: SegId) -> Self {
-		Self {
-			event_tx: event_tx.clone(),
-			id,
-		}
-	}
-}
-
-impl SpanMapListener for SegmentListener {
-	fn span_added(&self, offs: usize) {
-		self.event_tx.send(BackendEvent::SegmentChanged {
-			ea: EA::new(self.id, offs),
-			ev: SegmentChangedEvent::Add
-		}).expect("UI thread crashed??");
-	}
-	fn span_removed(&self, offs: usize) {
-		self.event_tx.send(BackendEvent::SegmentChanged {
-			ea: EA::new(self.id, offs),
-			ev: SegmentChangedEvent::Remove
-		}).expect("UI thread crashed??");
-	}
-	fn span_changed(&self, offs: usize) {
-		self.event_tx.send(BackendEvent::SegmentChanged {
-			ea: EA::new(self.id, offs),
-			ev: SegmentChangedEvent::Change
-		}).expect("UI thread crashed??");
 	}
 }

@@ -1,5 +1,7 @@
 //! Originally by T-Dark, Potassium Shill (@t.dark) on the Rust Programming Language Community
-//! Discord, modified for my uses
+//! Discord, modified for my use
+//!
+//! https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=7cc54f29bc3faffc0019cdf21c746ff7
 //!
 //! licensed CC0
 
@@ -65,6 +67,7 @@ pub(crate) use backend_command_enum_tx;
 // generates an enum for the messages and one for the replies.
 macro_rules! backend_command_enum {
 	([$global_self:ident $global_prog:ident] $(
+		$(#[$attr:meta])*
 		$vis:vis fn $fn_name:ident
 			( $self:ident : $self_ty:ty $(, $arg_name:ident : $arg_type:ty)* )
 			$(-> $ret_type:ty)? $body:block
@@ -104,12 +107,14 @@ pub(crate) use backend_command_method_body;
 // Macro number two. This one generates all the functions on the backend handle
 macro_rules! backend_command_methods {
 	([$global_self:ident $global_prog:ident] $(
+		$(#[$attr:meta])*
 		$vis:vis fn $fn_name:ident
 			( $self:ident : $self_ty:ty $(, $arg_name:ident : $arg_type:ty)* )
 			$(-> $ret_type:ty)? $body:block
 	)*) => {
 		impl Backend {
 			$(
+				$(#[$attr])*
 				$vis fn $fn_name (&self, $( $arg_name : $arg_type ),* ) $(-> $ret_type)? {
 					backend_command_method_body! { $fn_name ( self, $($arg_name)* ) -> $($ret_type)? }
 				}
@@ -136,6 +141,7 @@ pub(crate) use backend_thread_command_loop_arm_body;
 // dispatches to the appropriate function, and sends a reply.
 macro_rules! backend_thread_command_loop {
 	([$global_self:ident $global_prog:ident] $(
+		$(#[$attr:meta])*
 		$vis:vis fn $fn_name:ident
 			( $self:ident : $self_ty:ty $(, $arg_name:ident : $arg_type:ty)* )
 			$(-> $ret_type:ty)? $body:block
