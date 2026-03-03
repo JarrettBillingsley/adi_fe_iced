@@ -51,12 +51,15 @@ pub enum BackendEvent {
 // Backend
 // ------------------------------------------------------------------------------------------------
 
+/// The frontend's "handle" to the backend. Abstracts away the fact that the backend is running on
+/// another thread, and allows the frontend to interact with it as if it's just a normal object.
 pub struct Backend {
 	event_rx:   Receiver<BackendEvent>,
 	command_tx: Sender<BackendCommand>,
 }
 
 impl Backend {
+	/// Create a new backend on a new thread using the given [`Image`].
 	pub fn on_new_thread(image: Image) -> PlatformResult<Self> {
 		let (event_tx, event_rx) = channel();
 		let (command_tx, command_rx) = channel();
@@ -84,6 +87,8 @@ impl Backend {
 		success.wait().clone().map(|_| Self { event_rx, command_tx })
 	}
 
+	/// Interator over any pending events sent by the backend to the frontend. Looping over this
+	/// iterator will exit the loop once there are no pending events left.
 	pub fn pending_events(&self) -> ChanTryIter<'_, BackendEvent> {
 		self.event_rx.try_iter()
 	}
@@ -102,14 +107,56 @@ impl Backend {
 }
 
 // ------------------------------------------------------------------------------------------------
+// SegmentListener
+// ------------------------------------------------------------------------------------------------
+
+/// Listens for changes on [`Segment`]s and sends them as [`BackendEvent`]s to the frontend.
+struct SegmentListener {
+	event_tx:   Sender<BackendEvent>,
+	id:         SegId,
+}
+
+impl SegmentListener {
+	fn new(event_tx: &Sender<BackendEvent>, id: SegId) -> Self {
+		Self {
+			event_tx: event_tx.clone(),
+			id,
+		}
+	}
+
+	fn event(&self, offs: usize, ev: SegmentChangedEvent) {
+		self.event_tx.send(BackendEvent::SegmentChanged {
+			ea: EA::new(self.id, offs),
+			ev
+		}).expect("UI thread crashed??");
+	}
+}
+
+impl SpanMapListener for SegmentListener {
+	fn span_added(&self, offs: usize) {
+		self.event(offs, SegmentChangedEvent::Add);
+	}
+	fn span_removed(&self, offs: usize) {
+		self.event(offs, SegmentChangedEvent::Remove);
+	}
+	fn span_changed(&self, offs: usize) {
+		self.event(offs, SegmentChangedEvent::Change);
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
 // BackendThread
 // ------------------------------------------------------------------------------------------------
 
+/// The actual backend thread which creates the [`Program`], listens for and responds to commands
+/// from the frontend, and sends events when the `Program` changes.
 struct BackendThread {
 	event_tx:   Sender<BackendEvent>,
 	command_rx: Receiver<BackendCommand>,
 }
 
+// used by `BackendThread::command_loop` which is defined by
+// "invoke_with_tokens!(backend_thread_command_loop..." below
 fn respond<T>(tx: OneshotSender<T>, response: T) {
 	tx.send(response).expect("UI thread crashed??");
 }
@@ -139,45 +186,6 @@ impl BackendThread {
 
 	fn event(&self, ev: BackendEvent) {
 		self.event_tx.send(ev).expect("UI thread crashed??");
-	}
-}
-
-// ------------------------------------------------------------------------------------------------
-// SegmentListener
-// ------------------------------------------------------------------------------------------------
-
-struct SegmentListener {
-	event_tx:   Sender<BackendEvent>,
-	id:         SegId,
-}
-
-impl SegmentListener {
-	fn new(event_tx: &Sender<BackendEvent>, id: SegId) -> Self {
-		Self {
-			event_tx: event_tx.clone(),
-			id,
-		}
-	}
-}
-
-impl SpanMapListener for SegmentListener {
-	fn span_added(&self, offs: usize) {
-		self.event_tx.send(BackendEvent::SegmentChanged {
-			ea: EA::new(self.id, offs),
-			ev: SegmentChangedEvent::Add
-		}).expect("UI thread crashed??");
-	}
-	fn span_removed(&self, offs: usize) {
-		self.event_tx.send(BackendEvent::SegmentChanged {
-			ea: EA::new(self.id, offs),
-			ev: SegmentChangedEvent::Remove
-		}).expect("UI thread crashed??");
-	}
-	fn span_changed(&self, offs: usize) {
-		self.event_tx.send(BackendEvent::SegmentChanged {
-			ea: EA::new(self.id, offs),
-			ev: SegmentChangedEvent::Change
-		}).expect("UI thread crashed??");
 	}
 }
 
@@ -222,7 +230,7 @@ export_backend_commands! {
 
 	/// Renders a span at the given EA into a [`CodeViewItem`].
 	pub fn get_rendered_span(self: &Self, ea: EA) -> CodeViewItem {
-		self.render_span(&prog, ea)
+		render_span(&prog, ea)
 	}
 
 	/// Get the offset of the last span in `seg`.
@@ -245,7 +253,7 @@ export_backend_commands! {
 		prog.segment_from_id(ea.seg()).span_after_ea(ea)
 	}
 
-	/// Analyze any pending items in the analysis queue. This may a while, and will generate
+	/// Analyze any pending items in the analysis queue. This may take a while, and will generate
 	/// [`BackendEvent`]s while it runs.
 	pub fn analyze_queue(self: &Self) {
 		self.event(BackendEvent::AutoAnalysisStatus { running: true });
@@ -262,171 +270,169 @@ invoke_with_tokens!(backend_thread_command_loop, backend_command_tokens);
 // Rendering stuff
 // ------------------------------------------------------------------------------------------------
 
-impl BackendThread {
-	fn render_span(&self, prog: &Program, ea: EA) -> CodeViewItem {
-		let span = prog.span_at_ea(ea);
+fn render_span(prog: &Program, ea: EA) -> CodeViewItem {
+	let span = prog.span_at_ea(ea);
 
-		match span.kind() {
-			SpanKind::Unk      => self.render_unk(prog, &span),
-			SpanKind::Code(id) => self.render_bb(prog, prog.get_bb(id)),
-			SpanKind::Data(id) => self.render_data(prog, prog.get_data(id)),
-			_ => panic!("uhhhhh why are we trying to render an in-progress span?"),
-		}
+	match span.kind() {
+		SpanKind::Unk      => render_unk(prog, &span),
+		SpanKind::Code(id) => render_bb(prog, prog.get_bb(id)),
+		SpanKind::Data(id) => render_data(prog, prog.get_data(id)),
+		_ => panic!("uhhhhh why are we trying to render an in-progress span?"),
+	}
+}
+
+fn bb_func_differs_from_previous(prog: &Program, bb: &BasicBlock) -> bool {
+	let seg = prog.segment_from_ea(bb.ea());
+	if let Some(span) = seg.span_before_ea(bb.ea())
+		&& let Some(func) = prog.func_that_contains(span.start())
+		&& func.id() != bb.func() {
+		return true;
 	}
 
-	fn bb_func_differs_from_previous(&self, prog: &Program, bb: &BasicBlock) -> bool {
-		let seg = prog.segment_from_ea(bb.ea());
-		if let Some(span) = seg.span_before_ea(bb.ea())
-			&& let Some(func) = prog.func_that_contains(span.start())
-			&& func.id() != bb.func() {
-			return true;
-		}
+	false
+}
 
-		false
-	}
+// if this bb's function differs from the function (if any) that owns the previous span, we need
+// to show either a function header or a function piece header.
+fn render_bb_header(prog: &Program, bb: &BasicBlock) -> FunctionData {
+	let func = prog.get_func(bb.func());
 
-	// if this bb's function differs from the function (if any) that owns the previous span, we need
-	// to show either a function header or a function piece header.
-	fn render_bb_header(&self, prog: &Program, bb: &BasicBlock) -> FunctionData {
-		let func = prog.get_func(bb.func());
+	if bb_func_differs_from_previous(prog, bb) {
+		let name = prog.name_of_ea(func.ea());
 
-		if self.bb_func_differs_from_previous(prog, bb) {
-			let name = prog.name_of_ea(func.ea());
-
-			if bb.id() == func.head_id() {
-				let attrs = if !func.attrs().is_empty() {
-					format!("{:?}", func.attrs())
-				} else {
-					"".to_string()
-				};
-				let entrypoints = if func.is_multi_entry() {
-					func.entrypoints().iter()
-						.map(|bbid| prog.name_of_ea(prog.get_bb(*bbid).ea()))
-						.collect::<Vec<_>>()
-						.join(", ")
-				} else {
-					"".to_string()
-				};
-
-				FunctionData {
-					name,
-					is_piece: false,
-					attrs,
-					entrypoints,
-				}
+		if bb.id() == func.head_id() {
+			let attrs = if !func.attrs().is_empty() {
+				format!("{:?}", func.attrs())
 			} else {
-				FunctionData {
-					name,
-					is_piece: true,
-					..Default::default()
-				}
+				"".to_string()
+			};
+			let entrypoints = if func.is_multi_entry() {
+				func.entrypoints().iter()
+					.map(|bbid| prog.name_of_ea(prog.get_bb(*bbid).ea()))
+					.collect::<Vec<_>>()
+					.join(", ")
+			} else {
+				"".to_string()
+			};
+
+			FunctionData {
+				name,
+				is_piece: false,
+				attrs,
+				entrypoints,
 			}
 		} else {
-			Default::default()
+			FunctionData {
+				name,
+				is_piece: true,
+				..Default::default()
+			}
 		}
+	} else {
+		Default::default()
+	}
+}
+
+fn render_bb_code(prog: &Program, bb: &BasicBlock) -> Vec<CodeLineData> {
+	let mut ret = vec![];
+
+	let seg = prog.segment_from_ea(bb.ea());
+	let seg_name = seg.name();
+	let state = bb.mmu_state();
+
+	for inst in bb.insts() {
+		let mut bytes = String::new();
+		let b = inst.bytes();
+
+		match b.len() {
+			1 => write!(bytes, "{:02X}",               b[0]).unwrap(),
+			2 => write!(bytes, "{:02X} {:02X}",        b[0], b[1]).unwrap(),
+			3 => write!(bytes, "{:02X} {:02X} {:02X}", b[0], b[1], b[2]).unwrap(),
+			_ => unreachable!()
+		}
+
+		let mut output = UIRenderOutput::new();
+		prog.inst_print(inst, state, &mut output).unwrap();
+		let (mnemonic, operands) = output.finish();
+
+		ret.push(CodeLineData {
+			ea:    TextEA::new(seg_name, prog.fmt_addr(inst.va().0)),
+			bytes,
+			mnemonic,
+			operands,
+		});
 	}
 
-	fn render_bb_code(&self, prog: &Program, bb: &BasicBlock) -> Vec<CodeLineData> {
-		let mut ret = vec![];
+	ret
+}
 
-		let seg = prog.segment_from_ea(bb.ea());
-		let seg_name = seg.name();
-		let state = bb.mmu_state();
+fn render_bb(prog: &Program, bb: &BasicBlock) -> CodeViewItem {
+	let func_header = render_bb_header(prog, bb);
+	let label = if prog.get_inrefs(bb.ea()).is_some() {
+		prog.name_of_ea(bb.ea())
+	} else {
+		"".to_string()
+	};
 
-		for inst in bb.insts() {
-			let mut bytes = String::new();
-			let b = inst.bytes();
+	CodeViewItem::BasicBlock(BasicBlockData {
+		ea:    bb.ea(),
+		func:  func_header,
+		label,
+		lines: render_bb_code(prog, bb),
+	})
+}
 
-			match b.len() {
-				1 => write!(bytes, "{:02X}",               b[0]).unwrap(),
-				2 => write!(bytes, "{:02X} {:02X}",        b[0], b[1]).unwrap(),
-				3 => write!(bytes, "{:02X} {:02X} {:02X}", b[0], b[1], b[2]).unwrap(),
-				_ => unreachable!()
+fn render_data(_prog: &Program, _bb: &DataItem) -> CodeViewItem {
+	CodeViewItem::DataItem
+}
+
+fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
+	// TODO: these should be configurable
+	const UNK_SIZE_CUTOFF: usize = 128;
+	const UNK_STRIDE: usize = 16;
+
+	let ea       = span.start();
+	let seg      = prog.segment_from_ea(ea);
+	let state    = prog.mmu_state_at(ea).unwrap_or_else(|| prog.initial_mmu_state());
+	let va       = prog.va_from_ea(state, ea);
+	let seg_name = seg.name();
+
+	let mut lines = vec![UnknownLineData {
+		ea:    TextEA::new(seg_name, prog.fmt_addr(va.0)),
+		bytes: format!("[{} unexplored byte(s)]", span.len())
+	}];
+
+	if seg.is_real() {
+		let len = span.len().min(UNK_SIZE_CUTOFF);
+		let slice = seg.image_slice(ea .. ea + len);
+		let data = slice.data();
+		let mut addr = prog.fmt_addr(va.0);
+
+		for (i, chunk) in data.chunks(UNK_STRIDE).enumerate() {
+			let mut bytes = String::with_capacity(chunk.len() * 3);
+
+			bytes.push_str(&format!("{:02X}", chunk[0]));
+
+			for byte in &chunk[1 ..] {
+				bytes.push_str(&format!(" {:02X}", byte));
 			}
 
-			let mut output = UIRenderOutput::new();
-			prog.inst_print(inst, state, &mut output).unwrap();
-			let (mnemonic, operands) = output.finish();
-
-			ret.push(CodeLineData {
-				ea:    TextEA::new(seg_name, prog.fmt_addr(inst.va().0)),
+			addr = prog.fmt_addr(va.0 + i * UNK_STRIDE);
+			lines.push(UnknownLineData {
+				ea: TextEA::new(seg_name, &addr),
 				bytes,
-				mnemonic,
-				operands,
 			});
 		}
 
-		ret
-	}
-
-	fn render_bb(&self, prog: &Program, bb: &BasicBlock) -> CodeViewItem {
-		let func_header = self.render_bb_header(prog, bb);
-		let label = if prog.get_inrefs(bb.ea()).is_some() {
-			prog.name_of_ea(bb.ea())
-		} else {
-			"".to_string()
-		};
-
-		CodeViewItem::BasicBlock(BasicBlockData {
-			ea:    bb.ea(),
-			func:  func_header,
-			label,
-			lines: self.render_bb_code(prog, bb),
-		})
-	}
-
-	fn render_data(&self, _prog: &Program, _bb: &DataItem) -> CodeViewItem {
-		CodeViewItem::DataItem
-	}
-
-	fn render_unk(&self, prog: &Program, span: &Span) -> CodeViewItem {
-		// TODO: these should be configurable
-		const UNK_SIZE_CUTOFF: usize = 128;
-		const UNK_STRIDE: usize = 16;
-
-		let ea       = span.start();
-		let seg      = prog.segment_from_ea(ea);
-		let state    = prog.mmu_state_at(ea).unwrap_or_else(|| prog.initial_mmu_state());
-		let va       = prog.va_from_ea(state, ea);
-		let seg_name = seg.name();
-
-		let mut lines = vec![UnknownLineData {
-			ea:    TextEA::new(seg_name, prog.fmt_addr(va.0)),
-			bytes: format!("[{} unexplored byte(s)]", span.len())
-		}];
-
-		if seg.is_real() {
-			let len = span.len().min(UNK_SIZE_CUTOFF);
-			let slice = seg.image_slice(ea .. ea + len);
-			let data = slice.data();
-			let mut addr = prog.fmt_addr(va.0);
-
-			for (i, chunk) in data.chunks(UNK_STRIDE).enumerate() {
-				let mut bytes = String::with_capacity(chunk.len() * 3);
-
-				bytes.push_str(&format!("{:02X}", chunk[0]));
-
-				for byte in &chunk[1 ..] {
-					bytes.push_str(&format!(" {:02X}", byte));
-				}
-
-				addr = prog.fmt_addr(va.0 + i * UNK_STRIDE);
-				lines.push(UnknownLineData {
-					ea: TextEA::new(seg_name, &addr),
-					bytes,
-				});
-			}
-
-			if span.len() > UNK_SIZE_CUTOFF {
-				lines.push(UnknownLineData {
-					ea: TextEA::new(seg_name, &addr),
-					bytes: "...".into(),
-				});
-			}
+		if span.len() > UNK_SIZE_CUTOFF {
+			lines.push(UnknownLineData {
+				ea: TextEA::new(seg_name, &addr),
+				bytes: "...".into(),
+			});
 		}
-
-		CodeViewItem::Unknown(UnknownData { lines })
 	}
+
+	CodeViewItem::Unknown(UnknownData { lines })
 }
 
 // ------------------------------------------------------------------------------------------------
