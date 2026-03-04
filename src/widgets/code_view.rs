@@ -10,10 +10,21 @@ use iced::{
 
 use adi::{ EA, SegId, PrintStyle };
 
-use crate::{ CONSOLAS_FONT, FontEx };
+use crate::{ CONSOLAS_FONT_BOLD };
 use crate::backend::{ Backend, SegmentChangedEvent };
 use crate::ui::*;
 use crate::widgets::sparse_list::{ sparse_list, IContent, Change as ListChange };
+
+// ------------------------------------------------------------------------------------------------
+// OperandLocation
+// ------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OperandLocation {
+	pub(crate) bb_ea: EA,
+	pub(crate) instn: usize,
+	pub(crate) opn: usize,
+}
 
 // ------------------------------------------------------------------------------------------------
 // CodeViewMessage
@@ -21,8 +32,8 @@ use crate::widgets::sparse_list::{ sparse_list, IContent, Change as ListChange }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CodeViewMessage {
-	OperandHovered { bb_ea: EA, instn: usize, opn: usize, over: bool },
-	OperandClicked { bb_ea: EA, instn: usize, opn: usize },
+	OperandHovered { loc: OperandLocation, over: bool },
+	OperandClicked { loc: OperandLocation },
 	JumpTo { ea: EA },
 	SwitchSegment { id: SegId },
 	JumpToTop,
@@ -123,7 +134,7 @@ struct CodeLine {
 fn codetext(s: impl Into<String>, style: impl Into<PrintStyleEx>)
  -> Element<'static, CodeViewMessage> {
 	text(s.into())
-		.font(CONSOLAS_FONT.bold())
+		.font(CONSOLAS_FONT_BOLD)
 		.color(color_of(style.into()))
 		.into()
 }
@@ -165,10 +176,11 @@ operands: Vec<CodeOpData>) -> Element<'static, CodeViewMessage> {
 			items.push(
 				mouse_area(codetext(op.text, op.style))
 					.on_enter(CodeViewMessage::OperandHovered
-						{ bb_ea, instn, opn: opn as usize, over: true })
+						{ loc: OperandLocation { bb_ea, instn, opn: opn as usize }, over: true })
 					.on_exit(CodeViewMessage::OperandHovered
-						{ bb_ea, instn, opn: opn as usize, over: false })
-					.on_press(CodeViewMessage::OperandClicked { bb_ea, instn, opn: opn as usize })
+						{ loc: OperandLocation { bb_ea, instn, opn: opn as usize }, over: false })
+					.on_press(CodeViewMessage::OperandClicked
+						{ loc: OperandLocation { bb_ea, instn, opn: opn as usize } })
 					.into()
 			);
 		} else {

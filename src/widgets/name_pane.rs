@@ -14,7 +14,7 @@ use iced::{
 	},
 };
 
-use crate::{ Message, CONSOLAS_FONT, FontEx };
+use crate::{ Message, CONSOLAS_FONT_BOLD, FontEx };
 use crate::ui::{ NameListData };
 use crate::backend::{ Backend };
 use crate::widgets::code_view::{ CodeViewMessage };
@@ -36,7 +36,7 @@ impl NamePane {
 
 	pub(crate) fn view(&self) -> PaneContent<'_, Message> {
 		let ui = scrollable(column(self.names.iter().map(|NameListData { ea, name }| {
-			button(text(name).font(CONSOLAS_FONT.bold()))
+			button(text(name).font(CONSOLAS_FONT_BOLD))
 				.style(button::text)
 				.on_press(CodeViewMessage::JumpTo { ea: *ea }.into())
 				.into()

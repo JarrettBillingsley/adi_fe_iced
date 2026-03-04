@@ -2,11 +2,11 @@
 use std::rc::{ Rc };
 
 use iced::{
-	Element, Font, Length, Padding, Task, color, Subscription,
+	Element, Font, Task, Subscription,
 	font::{ Weight },
 	time::{ self, milliseconds },
 	widget::{
-		column, row, container, button, space, pick_list,
+		column, row, button, space,
 
 		pane_grid,
 		pane_grid::{
@@ -16,16 +16,13 @@ use iced::{
 			// DragEvent as PaneDragEvent,
 			ResizeEvent as PaneResizeEvent,
 			State as PaneState,
-			TitleBar as PaneTitleBar,
 		},
-
-		text,
 
 		operation::{ self, AbsoluteOffset, RelativeOffset },
 	},
 };
 
-use adi::{ EA, SegId, Image };
+use adi::{ SegId, Image };
 
 use simplelog::{ *, Color as SimpleLogColor };
 use log::*;
@@ -39,13 +36,15 @@ use native_dialog::{ DialogBuilder };
 mod backend;
 mod ui;
 mod widgets {
+	pub mod code_pane;
 	pub mod code_view;
 	pub mod name_pane;
 	pub mod sparse_list;
 }
 
-use backend::{ Backend, BackendEvent, SegmentChangedEvent };
-use widgets::code_view::{ CodeView, CodeViewMessage };
+use backend::{ Backend, BackendEvent };
+use widgets::code_view::{ CodeViewMessage, OperandLocation };
+use widgets::code_pane::{ CodePane };
 use widgets::name_pane::{ NamePane };
 
 // ------------------------------------------------------------------------------------------------
@@ -91,6 +90,7 @@ fn setup_panic() {
 
 const CONSOLAS_BYTES: &[u8] = include_bytes!("../resources/consolab.ttf");
 pub(crate) const CONSOLAS_FONT: Font = Font::with_name("Consolas");
+pub(crate) const CONSOLAS_FONT_BOLD: Font = Font { weight: Weight::Bold, ..CONSOLAS_FONT };
 
 pub(crate) trait FontEx {
 	fn bold(&self) -> Font;
@@ -118,68 +118,6 @@ pub(crate) enum Message {
 impl From<CodeViewMessage> for Message {
 	fn from(cvm: CodeViewMessage) -> Self {
 		Self::CodeView(cvm)
-	}
-}
-
-// ------------------------------------------------------------------------------------------------
-// CodePane
-// ------------------------------------------------------------------------------------------------
-
-struct CodePane {
-	codeview: CodeView,
-	backend:  Rc<Backend>,
-}
-
-impl CodePane {
-	// TODO: generate unique ID instead (could have multiple code panes open at once)
-	const CODEVIEW_ID: &str = "panes.code.codeview";
-
-	fn new(id: SegId, backend: Rc<Backend>) -> Self {
-		Self {
-			codeview: CodeView::new(id, backend.clone()),
-			backend,
-		}
-	}
-
-	fn set_segment(&mut self, segid: SegId) {
-		if self.codeview.segid() != segid {
-			self.codeview = CodeView::new(segid, self.backend.clone());
-		}
-	}
-
-	fn dispatch_event(&self, ea: EA, ev: SegmentChangedEvent) {
-		self.codeview.dispatch_event(ea, ev);
-	}
-
-	fn view(&self) -> PaneContent<'_, Message> {
-		let list = self.codeview.view(Self::CODEVIEW_ID).map(Message::CodeView);
-
-		let ui = container(list)
-		.width(Length::Fill)
-		.height(Length::Fill)
-		.padding(Padding::from([0, 10]))
-		.style(move |_theme| {
-			container::Style::default().background(color!(0x101010))
-		});
-
-		let mut all_segs = self.backend.get_all_segments();
-		all_segs.sort_by_key(|data| data.segid);
-		// SAFETY: self.codeview could only have been made from a valid segment ID
-		let this_seg = all_segs.iter()
-			.find(|data| data.segid == self.codeview.segid()).unwrap().clone();
-
-		let seg_selector = pick_list(
-			all_segs,
-			Some(this_seg),
-			|segdata| CodeViewMessage::SwitchSegment { id: segdata.segid }.into());
-
-		PaneContent::new(ui)
-		.title_bar(
-			PaneTitleBar::new(text("Code").size(20).font(Font::DEFAULT.bold()))
-				.padding(10)
-				.controls(pane_grid::Controls::new(seg_selector))
-				.always_show_controls()
-		)
 	}
 }
 
@@ -285,6 +223,7 @@ struct AdiFE {
 	#[allow(dead_code)] // TODO: temporary
 	name_pane: Pane,
 	code_pane: Pane,
+	cur_operand: Option<OperandLocation>
 }
 
 impl AdiFE {
@@ -300,7 +239,13 @@ impl AdiFE {
 				backend.clone())).unwrap();
 		panes.resize(split, 0.2);
 
-		Self { backend: backend.clone(), panes, name_pane, code_pane }
+		Self {
+			backend: backend.clone(),
+			panes,
+			name_pane,
+			code_pane,
+			cur_operand: None,
+		}
 	}
 
 	fn subscriptions(&self) -> Subscription<Message> {
@@ -337,18 +282,20 @@ impl AdiFE {
 	fn handle_code_view_message(&mut self, cvm: CodeViewMessage) -> Task<Message> {
 		use CodeViewMessage::*;
 		match cvm {
-			OperandHovered { bb_ea, instn, opn, over } => {
+			OperandHovered { loc, over } => {
 				if over {
+					self.cur_operand = Some(loc);
 					println!("TODO: hovered over BB {:?} instruction #{} operand #{}",
-						bb_ea, instn, opn);
-				} else {
+						loc.bb_ea, loc.instn, loc.opn);
+				} else if let Some(cur_operand) = self.cur_operand && cur_operand == loc {
+					self.cur_operand = None;
 					println!("TODO: stopped hovering over BB {:?} instruction #{} operand #{}",
-						bb_ea, instn, opn);
+						loc.bb_ea, loc.instn, loc.opn);
 				}
 			}
-			OperandClicked { bb_ea, instn, opn } => {
+			OperandClicked { loc } => {
 				println!("TODO: clicked BB {:?} instruction #{} operand #{}",
-					bb_ea, instn, opn);
+					loc.bb_ea, loc.instn, loc.opn);
 			}
 			JumpTo { ea } => {
 				self.code_pane_mut().set_segment(ea.seg());
