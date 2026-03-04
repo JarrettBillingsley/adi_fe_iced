@@ -65,7 +65,8 @@ impl CodeOpData {
 /// Data for a single line of rendered code inside a basic block.
 #[derive(Debug, Clone)]
 pub struct CodeLineData {
-	pub ea:       TextEA,
+	pub ea:       EA,
+	pub text_ea:  TextEA,
 	pub bytes:    String,
 	pub mnemonic: String,
 	pub operands: Vec<CodeOpData>,
@@ -110,8 +111,9 @@ pub struct BasicBlockData {
 /// Data for a single line of unknown data.
 #[derive(Debug, Clone)]
 pub struct UnknownLineData {
-	pub ea:    TextEA,
-	pub bytes: String,
+	pub ea:      EA,
+	pub text_ea: TextEA,
+	pub bytes:   String,
 }
 
 /// Data for a block of unknown data.
@@ -124,6 +126,6 @@ pub struct UnknownData {
 #[derive(Debug, Clone)]
 pub enum CodeViewItem {
 	BasicBlock(BasicBlockData),
-	DataItem(TextEA), // TODO
+	DataItem(EA, TextEA), // TODO
 	Unknown(UnknownData),
 }

@@ -80,7 +80,8 @@ fn render_bb_code(prog: &Program, bb: &BasicBlock) -> Vec<CodeLineData> {
 		let (mnemonic, operands) = output.finish();
 
 		ret.push(CodeLineData {
-			ea:    TextEA::new(seg_name, prog.fmt_addr(inst.va().0)),
+			ea:      inst.ea(),
+			text_ea: TextEA::new(seg_name, prog.fmt_addr(inst.va().0)),
 			bytes,
 			mnemonic,
 			operands,
@@ -113,7 +114,7 @@ fn render_data(prog: &Program, data: &DataItem) -> CodeViewItem {
 	let va       = prog.va_from_ea(state, ea);
 	let seg_name = seg.name();
 
-	CodeViewItem::DataItem(TextEA::new(seg_name, prog.fmt_addr(va.0)))
+	CodeViewItem::DataItem(ea, TextEA::new(seg_name, prog.fmt_addr(va.0)))
 }
 
 fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
@@ -128,8 +129,9 @@ fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
 	let seg_name = seg.name();
 
 	let mut lines = vec![UnknownLineData {
-		ea:    TextEA::new(seg_name, prog.fmt_addr(va.0)),
-		bytes: format!("[{} unexplored byte(s)]", span.len())
+		ea,
+		text_ea: TextEA::new(seg_name, prog.fmt_addr(va.0)),
+		bytes:   format!("[{} unexplored byte(s)]", span.len())
 	}];
 
 	if seg.is_real() {
@@ -137,6 +139,7 @@ fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
 		let slice = seg.image_slice(ea .. ea + len);
 		let data = slice.data();
 		let mut addr = prog.fmt_addr(va.0);
+		let mut last_i = 0;
 
 		for (i, chunk) in data.chunks(UNK_STRIDE).enumerate() {
 			let mut bytes = String::with_capacity(chunk.len() * 3);
@@ -149,15 +152,19 @@ fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
 
 			addr = prog.fmt_addr(va.0 + i * UNK_STRIDE);
 			lines.push(UnknownLineData {
-				ea: TextEA::new(seg_name, &addr),
+				ea:      ea + i,
+				text_ea: TextEA::new(seg_name, &addr),
 				bytes,
 			});
+
+			last_i = i;
 		}
 
 		if span.len() > UNK_SIZE_CUTOFF {
 			lines.push(UnknownLineData {
-				ea: TextEA::new(seg_name, &addr),
-				bytes: "...".into(),
+				ea:      ea + last_i,
+				text_ea: TextEA::new(seg_name, &addr),
+				bytes:   "...".into(),
 			});
 		}
 	}
