@@ -124,6 +124,6 @@ pub struct UnknownData {
 #[derive(Debug, Clone)]
 pub enum CodeViewItem {
 	BasicBlock(BasicBlockData),
-	DataItem, // TODO
+	DataItem(TextEA), // TODO
 	Unknown(UnknownData),
 }

@@ -38,7 +38,11 @@ use native_dialog::{ DialogBuilder };
 
 mod backend;
 mod ui;
-mod widgets;
+mod widgets {
+	pub mod code_view;
+	pub mod name_pane;
+	pub mod sparse_list;
+}
 
 use backend::{ Backend, BackendEvent, SegmentChangedEvent };
 use widgets::code_view::{ CodeView, CodeViewMessage };
@@ -333,6 +337,15 @@ impl AdiFE {
 	fn handle_code_view_message(&mut self, cvm: CodeViewMessage) -> Task<Message> {
 		use CodeViewMessage::*;
 		match cvm {
+			OperandHovered { bb_ea, instn, opn, over } => {
+				if over {
+					println!("TODO: hovered over BB {:?} instruction #{} operand #{}",
+						bb_ea, instn, opn);
+				} else {
+					println!("TODO: stopped hovering over BB {:?} instruction #{} operand #{}",
+						bb_ea, instn, opn);
+				}
+			}
 			OperandClicked { bb_ea, instn, opn } => {
 				println!("TODO: clicked BB {:?} instruction #{} operand #{}",
 					bb_ea, instn, opn);

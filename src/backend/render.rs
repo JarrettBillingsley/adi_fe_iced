@@ -106,8 +106,14 @@ fn render_bb(prog: &Program, bb: &BasicBlock) -> CodeViewItem {
 	})
 }
 
-fn render_data(_prog: &Program, _bb: &DataItem) -> CodeViewItem {
-	CodeViewItem::DataItem
+fn render_data(prog: &Program, data: &DataItem) -> CodeViewItem {
+	let ea       = data.ea();
+	let seg      = prog.segment_from_ea(ea);
+	let state    = prog.mmu_state_at(ea).unwrap_or_else(|| prog.initial_mmu_state());
+	let va       = prog.va_from_ea(state, ea);
+	let seg_name = seg.name();
+
+	CodeViewItem::DataItem(TextEA::new(seg_name, prog.fmt_addr(va.0)))
 }
 
 fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
