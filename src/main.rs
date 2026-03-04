@@ -36,6 +36,7 @@ use native_dialog::{ DialogBuilder };
 mod backend;
 mod ui;
 mod widgets {
+	pub mod code_line;
 	pub mod code_pane;
 	pub mod code_view;
 	pub mod name_pane;
@@ -52,7 +53,7 @@ use widgets::name_pane::{ NamePane };
 // ------------------------------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	setup_logging(LevelFilter::Debug)?;
+	setup_logging(LevelFilter::Trace)?;
 	setup_panic();
 	iced::application(AdiFE::init, AdiFE::update, AdiFE::view)
 		.font(CONSOLAS_BYTES)
@@ -361,6 +362,8 @@ impl AdiFE {
 	}
 
 	fn view(&self) -> Element<'_, Message> {
+		// TODO: is the view *supposed* to be recreated every time we get a CheckForEvents message?
+		// log::warn!("recreated entire window view");
 		column![
 			// trying to extract this callback into its own method is an exercise in frustration.
 			// just leave it here unless you want to have the Worst Types and Where Clauses Ever.
