@@ -157,23 +157,23 @@ impl<'a, T: Copy, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn elements_need_to_be_recreated(&self, state: &State) -> bool {
-		// log::trace!("ELEMENTS = {}, LAYOUTS = {}",
-		// 	self.visible_elements.len(), state.visible_layouts.len());
-		assert!((self.visible_elements.len() == state.visible_layouts.len()) ||
-			(self.visible_elements.is_empty() && !state.visible_layouts.is_empty()));
-
-		self.visible_elements.is_empty() && !state.visible_layouts.is_empty()
+		self.visible_elements.len() < state.visible_layouts.len()
 	}
 
 	/// recreate elements from layouts after this list has been recreated.
 	fn recreate_elements(&mut self, state: &State) {
+		// log::warn!("recreating elements...");
+
 		for (idx, _) in state.visible_layouts.iter() {
 			// if the item was removed from self.content, don't recreate the element.
 			if let Some(item) = self.content.get(*idx) {
 				self.visible_elements.insert(*idx, self.new_element_with(*idx, item));
+			} else {
+				// log::warn!("  item at index {:04X} was removed?", *idx);
 			}
 		}
 
+		// log::warn!("recreated elements");
 		self.dump_visible_indexes();
 	}
 
@@ -273,7 +273,7 @@ impl<'a, T: Copy, Message, Theme, Renderer: iced_core::Renderer>
 	/// if we ran out of elements (at the end of the list).
 	fn add_elements_after(&mut self, state: &mut State, renderer: &Renderer, original_idx: usize,
 	mut current_y: f32, mut pixels_remaining: f32) -> f32 {
-		// log::trace!("+ adding elements after {} ({} pixels)", original_idx, pixels_remaining);
+		// log::trace!("+ adding elements after {:04X} ({} pixels)", original_idx, pixels_remaining);
 		let mut ran_out_of_items = true;
 		for (idx, item) in self.content.items_after(original_idx) {
 			if pixels_remaining <= 0.0 {
@@ -416,6 +416,7 @@ impl<'a, T: Copy, Message, Theme, Renderer: iced_core::Renderer>
 	}
 
 	fn refresh(&mut self, state: &mut State, renderer: &Renderer, bounds: Rectangle) -> Vector {
+		// log::warn!("refresh()");
 		assert!(!self.content.is_empty(), "refresh called with no items in content");
 
 		// there are four possible cases:
@@ -532,6 +533,7 @@ impl<'a, T: Copy, Message, Theme, Renderer: iced_core::Renderer>
 	/// spawn/remove items when e.g. the bounds changed or items were added/removed/changed
 	fn try_scroll(&mut self, state: &mut State, renderer: &Renderer, bounds: Rectangle,
 	mut delta: Vector) -> Vector {
+		// log::warn!("try_scroll({:?})", delta);
 		// nothing to do if there are no items to display.
 		if self.content.is_empty() || state.visible_layouts.is_empty() {
 			return delta;
@@ -674,20 +676,6 @@ where
 
 		let bounds = layout.bounds();
 
-		if bounds != state.last_bounds {
-			// if the width changed, change the widths of all the visible items.
-			if bounds.width != state.last_bounds.width {
-				self.relayout_items(state, renderer);
-			}
-
-			// if the height changed, that could cause items to need to be added/removed.
-			if bounds.height != state.last_bounds.height {
-				self.try_scroll(state, renderer, bounds, Vector::ZERO);
-			}
-
-			state.last_bounds = bounds;
-		}
-
 		let last_offset_y = state.offset_y;
 
 		// check if it's been long enough to stop scrolling or they moved the mouse or whatever
@@ -814,6 +802,20 @@ where
 
 						// and apply any pending changes, now that everything is recreated.
 						self.apply_changes(state, renderer);
+					}
+
+					if bounds != state.last_bounds {
+						// if the width changed, change the widths of all the visible items.
+						if bounds.width != state.last_bounds.width {
+							self.relayout_items(state, renderer);
+						}
+
+						// if the height changed, that could cause items to need to be added/removed.
+						if bounds.height != state.last_bounds.height {
+							self.try_scroll(state, renderer, bounds, Vector::ZERO);
+						}
+
+						state.last_bounds = bounds;
 					}
 
 					if state.changes_happened {
