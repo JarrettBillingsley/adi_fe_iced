@@ -540,7 +540,10 @@ impl<'a, T: Copy, Message, Theme, Renderer: iced_core::Renderer>
 		}
 
 		// compute current and desired scroll offsets.
-		let cur_offset_y = state.absolute_offset(bounds.height, state.content_bounds.height);
+
+		// used to be: state.absolute_offset(bounds.height, state.content_bounds.height);
+		// but I'm not really sure why, and making it like this works better with vertical resizing
+		let cur_offset_y = state.offset_y;
 		let new_offset_y = cur_offset_y + delta.y;
 
 		let mut new_view_top = new_offset_y;
