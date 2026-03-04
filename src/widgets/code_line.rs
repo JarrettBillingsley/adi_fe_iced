@@ -9,7 +9,7 @@ use iced_core::{
 
 use iced::{
 	Element, Color as IcedColor, color, Size, Length, Theme,
-	widget::{ text, mouse_area, row, },
+	widget::{ text, mouse_area, },
 };
 
 use adi::{ EA, PrintStyle };
@@ -90,13 +90,6 @@ fn codetext(s: impl Into<String>, style: impl Into<PrintStyleEx>)
 		.into()
 }
 
-fn textea(ea: TextEA) -> Element<'static, CodeViewMessage> {
-	row![
-		codetext(ea.seg,                   PrintStyleEx::SegName),
-		codetext(format!(":{} ", ea.offs), PrintStyleEx::Plain),
-	].into()
-}
-
 // ------------------------------------------------------------------------------------------------
 // LineKind, CodeLine
 // ------------------------------------------------------------------------------------------------
@@ -129,7 +122,7 @@ pub(crate) struct CodeLine<'a> {
 	children: Vec<Element<'a, CodeViewMessage>>,
 
 	ea:      EA,
-	text_ea: Option<ChildIdx>,
+	text_ea: Option<(ChildIdx, ChildIdx)>,
 	kind:    LineKind,
 }
 
@@ -149,8 +142,9 @@ impl<'a> CodeLine<'a> {
 
 	pub(crate) fn new_error(ea: EA, text_ea: TextEA, message: String) -> Self {
 		let children = vec![
-			textea(text_ea),                        // 0
-			codetext(message, PrintStyleEx::Error), // 1
+			codetext(text_ea.seg,                   PrintStyleEx::SegName), // 0
+			codetext(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
+			codetext(message,                       PrintStyleEx::Error),   // 2
 		];
 
 		Self {
@@ -158,8 +152,8 @@ impl<'a> CodeLine<'a> {
 			height: Length::Shrink,
 			children,
 			ea,
-			text_ea: Some(ChildIdx(0)),
-			kind: LineKind::Error { message: ChildIdx(1) },
+			text_ea: Some((ChildIdx(0), ChildIdx(1))),
+			kind: LineKind::Error { message: ChildIdx(2) },
 		}.adjust_size()
 	}
 
@@ -198,12 +192,13 @@ impl<'a> CodeLine<'a> {
 	mnemonic: String, operands: Vec<CodeOpData>) -> Self {
 		let code_bytes = format!("{:8}     ", code_bytes);
 		let mut children = vec![
-			textea(text_ea),                                   // 0
-			codetext(code_bytes, PrintStyleEx::CodeBytes),     // 1
-			codetext(mnemonic,   PrintStyle::Mnemonic).into(), // 2
+			codetext(text_ea.seg,                   PrintStyleEx::SegName),   // 0
+			codetext(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),     // 1
+			codetext(code_bytes,                    PrintStyleEx::CodeBytes), // 2
+			codetext(mnemonic,                      PrintStyle::Mnemonic),    // 3
 		];
 
-		children.extend(operands.iter().map(|op| {             // 3, 4, ...
+		children.extend(operands.iter().map(|op| {                            // 4, 5, ...
 			match op.opn {
 				Some(opn) => {
 					let loc = OperandLocation { bb_ea, instn, opn };
@@ -222,30 +217,31 @@ impl<'a> CodeLine<'a> {
 			height: Length::Shrink,
 			children,
 			ea,
-			text_ea: Some(ChildIdx(0)),
+			text_ea: Some((ChildIdx(0), ChildIdx(1))),
 			kind: LineKind::Code {
 				bb_ea,
 				instn,
-				code_bytes: ChildIdx(1),
-				mnemonic:   ChildIdx(2),
+				code_bytes: ChildIdx(2),
+				mnemonic:   ChildIdx(3),
 				operands: operands.into_iter().enumerate()
-					.map(|(i, op)| (op, ChildIdx(3 + i))).collect()
+					.map(|(i, op)| (op, ChildIdx(4 + i))).collect()
 			},
 		}.adjust_size()
 	}
 
 	pub(crate) fn new_unknown(ea: EA, text_ea: TextEA, bytes: String) -> Self {
 		let children = vec![
-			textea(text_ea),                        // 0
-			codetext(bytes, PrintStyleEx::Unknown), // 1
+			codetext(text_ea.seg,                   PrintStyleEx::SegName), // 0
+			codetext(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
+			codetext(bytes,                         PrintStyleEx::Unknown), // 2
 		];
 		Self {
 			width: Length::Shrink,
 			height: Length::Shrink,
 			children,
 			ea,
-			text_ea: Some(ChildIdx(0)),
-			kind: LineKind::Unknown { bytes: ChildIdx(1) },
+			text_ea: Some((ChildIdx(0), ChildIdx(1))),
+			kind: LineKind::Unknown { bytes: ChildIdx(2) },
 		}.adjust_size()
 	}
 
