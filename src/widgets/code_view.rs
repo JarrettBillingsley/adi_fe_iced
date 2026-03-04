@@ -23,7 +23,7 @@ use crate::widgets::sparse_list::{ sparse_list, IContent, Change as ListChange }
 pub(crate) struct OperandLocation {
 	pub(crate) bb_ea: EA,
 	pub(crate) instn: usize,
-	pub(crate) opn: usize,
+	pub(crate) opn: u8,
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -123,7 +123,7 @@ enum LineKind {
 }
 
 struct CodeLine {
-	ea: Option<TextEA>,
+	ea: TextEA,
 	kind: LineKind,
 }
 
@@ -139,64 +139,65 @@ fn codetext(s: impl Into<String>, style: impl Into<PrintStyleEx>)
 		.into()
 }
 
-fn blank_line() -> Element<'static, CodeViewMessage> {
-	codetext("", PrintStyleEx::Plain)
-}
-
-fn error_line(ea: TextEA, message: String) -> Element<'static, CodeViewMessage> {
-	row![
+fn textea(ea: TextEA) -> Vec<Element<'static, CodeViewMessage>> {
+	vec![
 		codetext(ea.seg,                   PrintStyleEx::SegName),
 		codetext(format!(":{} ", ea.offs), PrintStyleEx::Plain),
-		codetext(message,                  PrintStyleEx::Error),
-	].into()
+	]
 }
 
-fn comment_line(comment: String) -> Element<'static, CodeViewMessage> {
-	codetext(format!("; {}", comment), PrintStyle::Comment)
+fn blank_line() -> Row<'static, CodeViewMessage> {
+	row![codetext("", PrintStyleEx::Plain)]
 }
 
-fn label_line(label: String) -> Element<'static, CodeViewMessage> {
+fn error_line(ea: TextEA, message: String) -> Row<'static, CodeViewMessage> {
+	let iter = textea(ea).into_iter()
+	.chain(Some(codetext(message, PrintStyleEx::Error)).into_iter());
+	Row::with_children(iter).into()
+}
+
+fn comment_line(comment: String) -> Row<'static, CodeViewMessage> {
+	row![codetext(format!("; {}", comment), PrintStyle::Comment)]
+}
+
+fn label_line(label: String) -> Row<'static, CodeViewMessage> {
+	let label = format!("                   {}", label);
 	row![
-		codetext(format!("                   {}", label), PrintStyle::Label),
-		codetext(":",                                     PrintStyleEx::Plain),
-	].into()
+		codetext(label, PrintStyle::Label),
+		codetext(":",   PrintStyleEx::Plain),
+	]
 }
 
 fn code_line(ea: TextEA, bb_ea: EA, instn: usize, code_bytes: String, mnemonic: String,
-operands: Vec<CodeOpData>) -> Element<'static, CodeViewMessage> {
-	let mut items = vec![
-		codetext(ea.seg,                            PrintStyleEx::SegName),
-		codetext(format!(":{}", ea.offs),           PrintStyleEx::Plain),
+operands: Vec<CodeOpData>) -> Row<'static, CodeViewMessage> {
+	let iter = textea(ea).into_iter()
+	.chain(vec![
 		codetext(format!(" {:8}     ", code_bytes), PrintStyleEx::CodeBytes),
 		codetext(mnemonic,                          PrintStyle::Mnemonic),
-	];
-
-	for op in operands.into_iter() {
-		if let Some(opn) = op.opn {
-			items.push(
+	].into_iter())
+	.chain(operands.into_iter().map(|op| {
+		match op.opn {
+			Some(opn) => {
+				let loc = OperandLocation { bb_ea, instn, opn };
 				mouse_area(codetext(op.text, op.style))
-					.on_enter(CodeViewMessage::OperandHovered
-						{ loc: OperandLocation { bb_ea, instn, opn: opn as usize }, over: true })
-					.on_exit(CodeViewMessage::OperandHovered
-						{ loc: OperandLocation { bb_ea, instn, opn: opn as usize }, over: false })
-					.on_press(CodeViewMessage::OperandClicked
-						{ loc: OperandLocation { bb_ea, instn, opn: opn as usize } })
+					.on_enter(CodeViewMessage::OperandHovered { loc, over: true })
+					.on_exit (CodeViewMessage::OperandHovered { loc, over: false })
+					.on_press(CodeViewMessage::OperandClicked { loc })
 					.into()
-			);
-		} else {
-			items.push(codetext(op.text, op.style));
+			}
+			None => codetext(op.text, op.style),
 		}
-	}
+	}));
 
-	Row::from_vec(items).into()
+	Row::with_children(iter).into()
 }
 
-fn unknown_line(ea: TextEA, bytes: String) -> Element<'static, CodeViewMessage> {
+fn unknown_line(ea: TextEA, bytes: String) -> Row<'static, CodeViewMessage> {
 	row![
 		codetext(ea.seg,                  PrintStyleEx::SegName),
 		codetext(format!(":{}", ea.offs), PrintStyleEx::Plain),
 		codetext(bytes,                   PrintStyleEx::Unknown),
-	].into()
+	]
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -227,61 +228,44 @@ impl CodeViewRenderer {
 		let CodeLine { ea, kind } = line;
 
 		match kind {
-			Blank => {
-				assert!(ea.is_none(), "blank line has spurious EA");
-				self.lines.push(blank_line());
-			}
-			Error { message } => {
-				let Some(ea) = ea else { panic!("error line missing EA"); };
-				self.lines.push(error_line(ea, message));
-			}
-			Comment { comment } => {
-				assert!(ea.is_none(), "comment line has spurious EA");
-				self.lines.push(comment_line(comment));
-			}
-			Label { label } => {
-				assert!(ea.is_none(), "label line has spurious EA");
-				self.lines.push(label_line(label));
-			}
-			Code { bb_ea, instn, code_bytes, mnemonic, operands, /*outrefs*/ } => {
-				let Some(ea) = ea else { panic!("code line missing EA"); };
-				self.lines.push(code_line(ea, bb_ea, instn, code_bytes, mnemonic, operands));
-			}
-			Unk { bytes } => {
-				let Some(ea) = ea else { panic!("unknown line missing EA"); };
-				self.lines.push(unknown_line(ea, bytes));
-			}
+			Blank               => self.lines.push(blank_line().into()),
+			Error   { message } => self.lines.push(error_line(ea, message).into()),
+			Comment { comment } => self.lines.push(comment_line(comment).into()),
+			Label   { label }   => self.lines.push(label_line(label).into()),
+			Unk     { bytes }   => self.lines.push(unknown_line(ea, bytes).into()),
+			Code    { bb_ea, instn, code_bytes, mnemonic, operands, /*outrefs*/ } =>
+				self.lines.push(code_line(ea, bb_ea, instn, code_bytes, mnemonic, operands).into()),
 		}
 	}
 
 	// --------------------------------------------------------------------------------------------
 	// Rendering methods
 
-	fn blank_line(&mut self) {
+	fn blank_line(&mut self, ea: TextEA) {
 		self.push_line(CodeLine {
-			ea: None,
+			ea,
 			kind: LineKind::Blank,
 		});
 	}
 
 	fn error_line(&mut self, ea: TextEA, message: impl Into<String>) {
 		self.push_line(CodeLine {
-			ea: Some(ea),
+			ea,
 			kind: LineKind::Error { message: message.into() },
 		});
 	}
 
-	fn comment_line(&mut self, comment: impl Into<String>) {
+	fn comment_line(&mut self, ea: TextEA, comment: impl Into<String>) {
 		self.push_line(CodeLine {
-			ea: None,
+			ea,
 			kind: LineKind::Comment { comment: comment.into() },
 		});
 	}
 
-	fn label_line(&mut self, label: String) {
+	fn label_line(&mut self, ea: TextEA, label: String) {
 		if !label.is_empty() {
 			self.push_line(CodeLine {
-				ea: None,
+				ea,
 				kind: LineKind::Label { label },
 			});
 		}
@@ -290,37 +274,37 @@ impl CodeViewRenderer {
 	fn code_line(&mut self, ea: TextEA, bb_ea: EA, instn: usize, code_bytes: String,
 	mnemonic: String, operands: Vec<CodeOpData>) {
 		self.push_line(CodeLine {
-			ea: Some(ea),
+			ea,
 			kind: LineKind::Code { bb_ea, instn, code_bytes, mnemonic, operands },
 		});
 	}
 
 	fn unknown_line(&mut self, ea: TextEA, bytes: String) {
 		self.push_line(CodeLine {
-			ea: Some(ea),
+			ea,
 			kind: LineKind::Unk { bytes }
 		});
 	}
 
-	fn func_data(&mut self, data: Option<FuncData>) {
+	fn func_data(&mut self, ea: TextEA, data: Option<FuncData>) {
 		let Some(data) = data else { return; };
 
-		self.comment_line(
+		self.comment_line(ea.clone(),
 			"; ------------------------------------------------------------------------------");
 
 		match data.kind {
 			FuncDataKind::Piece => {
-				self.comment_line(format!("; (Piece of function {})", data.name));
+				self.comment_line(ea.clone(), format!("; (Piece of function {})", data.name));
 			}
 			FuncDataKind::Head { attrs, entrypoints } => {
-				self.comment_line(format!("; Function {}", data.name));
+				self.comment_line(ea.clone(), format!("; Function {}", data.name));
 
 				if let Some(attrs) = attrs {
-					self.comment_line(format!("; Attributes: {}", attrs));
+					self.comment_line(ea.clone(), format!("; Attributes: {}", attrs));
 				}
 
 				if let Some(entrypoints) = entrypoints {
-					self.comment_line(format!("; Entry points: {}", entrypoints));
+					self.comment_line(ea.clone(), format!("; Entry points: {}", entrypoints));
 				}
 			}
 		}
@@ -338,15 +322,18 @@ impl BasicBlockData {
 		// TODO: inrefs
 		// TODO: MMU state
 
-		r.func_data(self.func);
-		r.label_line(self.label);
+		// SAFETY: lines is never empty
+		let first_ea = &self.lines.first().unwrap().ea;
+		let last_ea = self.lines.last().unwrap().ea.clone();
+		r.func_data(first_ea.clone(), self.func);
+		r.label_line(first_ea.clone(), self.label);
 
 		for (instn, line) in self.lines.into_iter().enumerate() {
 			r.code_line(line.ea, self.ea, instn, line.bytes, line.mnemonic, line.operands);
 			// TODO: outrefs
 		}
 
-		r.blank_line();
+		r.blank_line(last_ea);
 		r.finish()
 	}
 }
@@ -355,11 +342,14 @@ impl UnknownData {
 	fn render(self) -> Vec<Element<'static, CodeViewMessage>> {
 		let mut r = CodeViewRenderer::new();
 
+		// SAFETY: lines is never empty
+		let last_ea = self.lines.last().unwrap().ea.clone();
+
 		for line in self.lines.into_iter() {
 			r.unknown_line(line.ea, format!(" {}", line.bytes));
 		}
 
-		r.blank_line();
+		r.blank_line(last_ea);
 		r.finish()
 	}
 }
@@ -371,13 +361,13 @@ impl CodeViewItem {
 			CodeViewItem::DataItem(ea) => {
 				// TODO: data rendering
 				let mut r = CodeViewRenderer::new();
-				r.error_line(ea, "AAAAAAAA DATA UNIMPLEMENTED");
+				r.error_line(ea, "DATA UNIMPLEMENTED");
 				r.finish()
 			}
 			CodeViewItem::Unknown(unk) => unk.render(),
 		};
 
-		Column::from_vec(lines).into()
+		Column::with_children(lines).into()
 	}
 }
 
@@ -419,11 +409,13 @@ impl CodeView {
 	pub(crate) fn dispatch_event(&self, ea: EA, ev: SegmentChangedEvent) {
 		if ea.seg() == self.id {
 			use SegmentChangedEvent::*;
-			match ev {
-				Add    => self.changes.borrow_mut().push(ListChange::Added   { idx: ea.offs() }),
-				Remove => self.changes.borrow_mut().push(ListChange::Removed { idx: ea.offs() }),
-				Change => self.changes.borrow_mut().push(ListChange::Changed { idx: ea.offs() }),
-			}
+			self.changes.borrow_mut().push(
+				match ev {
+					Add    => ListChange::Added   { idx: ea.offs() },
+					Remove => ListChange::Removed { idx: ea.offs() },
+					Change => ListChange::Changed { idx: ea.offs() },
+				}
+			);
 		}
 	}
 
@@ -434,31 +426,34 @@ impl CodeView {
 	}
 }
 
+// just to keep my thoughts straight
+type SegOffs = usize;
+
 impl<'a> IContent<'a, EA> for CodeView {
 	fn len(&self) -> usize {
 		self.backend.get_num_spans(self.id)
 	}
 
-	fn first_index(&self) -> Option<usize> {
+	fn first_index(&self) -> Option<SegOffs> {
 		// by definition
 		Some(0)
 	}
 
-	fn last_index(&self) -> Option<usize> {
+	fn last_index(&self) -> Option<SegOffs> {
 		Some(self.backend.get_last_span_offset(self.id))
 	}
 
-	fn get(&self, idx: usize) -> Option<EA> {
+	fn get(&self, idx: SegOffs) -> Option<EA> {
 		Some(self.backend.get_span(EA::new(self.id, idx)).start())
 	}
 
-	fn items_before(&'a self, idx: usize)
-	-> Box<dyn Iterator<Item = (usize, EA)> + 'a> {
+	fn items_before(&'a self, idx: SegOffs)
+	-> Box<dyn Iterator<Item = (SegOffs, EA)> + 'a> {
 		Box::new(SpansBefore { seg: self, ea: EA::new(self.id, idx) })
 	}
 
-	fn items_after(&'a self, idx: usize)
-	-> Box<dyn Iterator<Item = (usize, EA)> + 'a> {
+	fn items_after(&'a self, idx: SegOffs)
+	-> Box<dyn Iterator<Item = (SegOffs, EA)> + 'a> {
 		Box::new(SpansAfter { seg: self, ea: EA::new(self.id, idx) })
 	}
 
@@ -473,7 +468,7 @@ struct SpansAfter<'a> {
 }
 
 impl<'a> Iterator for SpansAfter<'a> {
-	type Item = (usize, EA);
+	type Item = (SegOffs, EA);
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.seg.ea_after(self.ea).map(|next_ea| {
@@ -489,7 +484,7 @@ struct SpansBefore<'a> {
 }
 
 impl<'a> Iterator for SpansBefore<'a> {
-	type Item = (usize, EA);
+	type Item = (SegOffs, EA);
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.seg.ea_before(self.ea).map(|next_ea| {
