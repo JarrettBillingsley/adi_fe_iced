@@ -1,7 +1,7 @@
 use std::cell::{ RefCell };
 use std::rc::{ Rc };
 
-use iced::{ Element, widget::Column, };
+use iced::{ Element, widget::Column };
 
 use adi::{ EA, SegId };
 

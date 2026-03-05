@@ -1,7 +1,7 @@
 
 use iced_core::{
 	Widget, Layout, Rectangle,
-	widget::{ Tree },
+	widget::{ Tree, tree::{ Tag, State as TreeState } },
 	mouse::{ Cursor },
 	layout::{ Limits, Node },
 	renderer::{ Style },
@@ -88,6 +88,21 @@ fn codetext(s: impl Into<String>, style: impl Into<PrintStyleEx>)
 		.font(CONSOLAS_FONT_BOLD) // TODO: make font customizable
 		.color(color_of(style.into()))
 		.into()
+}
+
+// ------------------------------------------------------------------------------------------------
+// State
+// ------------------------------------------------------------------------------------------------
+
+struct State {
+	content_bounds: Rectangle,
+	layouts:        Vec<Node>,
+}
+
+impl State {
+	fn needs_layout(&self) -> bool {
+		self.layouts.is_empty()
+	}
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -260,6 +275,32 @@ impl<'a> CodeLine<'a> {
 		(self.width, self.height) = (width, height);
 		self
 	}
+
+	fn layout_children(&mut self, tree: &mut Tree, renderer: &iced::Renderer,
+	limits: &Limits) -> (Rectangle, Vec<Node>) {
+		// limits, but without any max width
+		let limits = Limits::new(
+			limits.min(),
+			Size::new(f32::INFINITY, limits.max().height)
+		);
+
+		let mut width: f32 = 0.0;
+		let mut height: f32 = 0.0;
+
+		let mut nodes: Vec<Node> = Vec::with_capacity(self.children.len());
+		nodes.resize(self.children.len(), Node::default());
+
+		for (i, (element, tree)) in self.children.iter_mut().zip(&mut tree.children).enumerate() {
+			nodes[i] = element
+				.as_widget_mut()
+				.layout(tree, renderer, &limits)
+				.move_to((width, 0.0));
+			width += nodes[i].size().width;
+			height = height.max(nodes[i].size().height);
+		}
+
+		(Rectangle::with_size(Size::new(width, height)), nodes)
+	}
 }
 
 impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
@@ -269,6 +310,17 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 
 	fn diff(&self, tree: &mut Tree) {
 		tree.diff_children(&self.children);
+	}
+
+	fn tag(&self) -> Tag {
+		Tag::of::<State>()
+	}
+
+	fn state(&self) -> TreeState {
+		TreeState::new(State {
+			content_bounds: Rectangle::with_size(Size::ZERO),
+			layouts:        vec![],
+		})
 	}
 
 	fn size(&self) -> Size<Length> {
@@ -284,14 +336,18 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 		renderer: &iced::Renderer,
 		limits: &Limits
 	) -> Node {
-		resolve(
-			renderer,
-			limits,
-			self.width,
-			self.height,
-			&mut self.children,
-			&mut tree.children,
-		)
+		let state = tree.state.downcast_mut::<State>();
+
+		if state.needs_layout() {
+			let (bounds, layouts) = self.layout_children(tree, renderer, limits);
+			let state = tree.state.downcast_mut::<State>();
+			state.content_bounds = bounds;
+			state.layouts = layouts;
+		}
+
+		let state = tree.state.downcast_mut::<State>();
+		let size = limits.resolve(Length::Fill, Length::Fill, state.content_bounds.size());
+		Node::with_children(size, state.layouts.clone())
 	}
 
 	fn operate(
@@ -308,9 +364,7 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 				.zip(&mut tree.children)
 				.zip(layout.children())
 				.for_each(|((child, state), layout)| {
-					child
-						.as_widget_mut()
-						.operate(state, layout, renderer, operation);
+					child.as_widget_mut() .operate(state, layout, renderer, operation);
 				});
 		});
 	}
@@ -401,212 +455,6 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			translation,
 		)
 	}
-}
-
-pub fn resolve(
-	renderer: &iced::Renderer,
-	limits: &Limits,
-	width: Length,
-	height: Length,
-	items: &mut [Element<'_, CodeViewMessage, iced::Theme, iced::Renderer>],
-	trees: &mut [Tree],
-) -> Node
-{
-	// TODO: there has to be an easier way to do this - this was adapted from the original
-	// iced::layout::flex::resolve which supported all kinds of shit which isn't needed here,
-	// but I'm too lazy to figure it out rn
-	let limits = limits.width(width).height(height);
-	let max_cross = limits.max().height;
-
-	let (main_compress, cross_compress) = {
-		let compression = limits.compression();
-		(compression.width, compression.height)
-	};
-
-	let compression = {
-		Size::new(main_compress, false)
-	};
-
-	let mut fill_main_sum = 0;
-	let mut some_fill_cross = false;
-	let mut cross = if cross_compress { 0.0 } else { max_cross };
-	let mut available = limits.max().width;
-
-	let mut nodes: Vec<Node> = Vec::with_capacity(items.len());
-	nodes.resize(items.len(), Node::default());
-
-	// FIRST PASS
-	// We lay out non-fluid elements in the main axis.
-	// If we need to compress the cross axis, then we skip any of these elements
-	// that are also fluid in the cross axis.
-	for (i, (child, tree)) in items.iter_mut().zip(trees.iter_mut()).enumerate() {
-		let (fill_main_factor, fill_cross_factor) = {
-			let size = child.as_widget().size();
-			(size.width.fill_factor(), size.height.fill_factor())
-		};
-
-		if (main_compress || fill_main_factor == 0) && (!cross_compress || fill_cross_factor == 0) {
-			let (max_width, max_height) = (
-				available,
-				if fill_cross_factor == 0 {
-					max_cross
-				} else {
-					cross
-				},
-			);
-
-			let child_limits =
-				Limits::with_compression(Size::ZERO, Size::new(max_width, max_height), compression);
-
-			let layout = child.as_widget_mut().layout(tree, renderer, &child_limits);
-			let size = layout.size();
-
-			available -= size.width;
-			cross = cross.max(size.height);
-
-			nodes[i] = layout;
-		} else {
-			fill_main_sum += fill_main_factor;
-			some_fill_cross = some_fill_cross || fill_cross_factor != 0;
-		}
-	}
-
-	// SECOND PASS (conditional)
-	// If we must compress the cross axis and there are fluid elements in the
-	// cross axis, we lay out any of these elements that are also non-fluid in
-	// the main axis (i.e. the ones we deliberately skipped in the first pass).
-	//
-	// We use the maximum cross length obtained in the first pass as the maximum
-	// cross limit.
-	//
-	// We can defer the layout of any elements that have a fixed size in the main axis,
-	// allowing them to use the cross calculations of the next pass.
-	if cross_compress && some_fill_cross {
-		for (i, (child, tree)) in items.iter_mut().zip(trees.iter_mut()).enumerate() {
-			let (main_size, cross_size) = {
-				let size = child.as_widget().size();
-				(size.width, size.height)
-			};
-
-			if (main_compress || main_size.fill_factor() == 0) && cross_size.fill_factor() != 0 {
-				if let Length::Fixed(main) = main_size {
-					available -= main;
-					continue;
-				}
-
-				let (max_width, max_height) = (available, cross);
-
-				let child_limits = Limits::with_compression(
-					Size::ZERO,
-					Size::new(max_width, max_height),
-					compression,
-				);
-
-				let layout = child.as_widget_mut().layout(tree, renderer, &child_limits);
-				let size = layout.size();
-
-				available -= size.width;
-				cross = cross.max(size.height);
-
-				nodes[i] = layout;
-			}
-		}
-	}
-
-	let remaining = available.max(0.0);
-
-	// THIRD PASS (conditional)
-	// We lay out the elements that are fluid in the main axis.
-	// We use the remaining space to evenly allocate space based on fill factors.
-	if !main_compress {
-		for (i, (child, tree)) in items.iter_mut().zip(trees.iter_mut()).enumerate() {
-			let (fill_main_factor, fill_cross_factor) = {
-				let size = child.as_widget().size();
-
-				(size.width.fill_factor(), size.height.fill_factor())
-			};
-
-			if fill_main_factor != 0 {
-				let max_main = remaining * fill_main_factor as f32 / fill_main_sum as f32;
-
-				let max_main = if max_main.is_nan() {
-					f32::INFINITY
-				} else {
-					max_main
-				};
-
-				let min_main = if max_main.is_infinite() {
-					0.0
-				} else {
-					max_main
-				};
-
-				let (max_width, max_height) = (
-					max_main,
-					if fill_cross_factor == 0 {
-						max_cross
-					} else {
-						cross
-					},
-				);
-
-				let child_limits = Limits::with_compression(
-					Size::new(min_main, 0.0),
-					Size::new(max_width, max_height),
-					compression,
-				);
-
-				let layout = child.as_widget_mut().layout(tree, renderer, &child_limits);
-				cross = cross.max(layout.size().height);
-
-				nodes[i] = layout;
-			}
-		}
-	}
-
-	// FOURTH PASS (conditional)
-	// We lay out any elements that were deferred in the second pass.
-	// These are elements that must be compressed in their cross axis and have
-	// a fixed length in the main axis.
-	if cross_compress && some_fill_cross {
-		for (i, (child, tree)) in items.iter_mut().zip(trees).enumerate() {
-			let (main_size, cross_size) = {
-				let size = child.as_widget().size();
-
-				(size.width, size.height)
-			};
-
-			if cross_size.fill_factor() != 0 {
-				let Length::Fixed(main) = main_size else {
-					continue;
-				};
-
-				let (max_width, max_height) = (main, cross);
-
-				let child_limits = Limits::new(Size::ZERO, Size::new(max_width, max_height));
-
-				let layout = child.as_widget_mut().layout(tree, renderer, &child_limits);
-				let size = layout.size();
-
-				cross = cross.max(size.height);
-
-				nodes[i] = layout;
-			}
-		}
-	}
-
-	let mut main = 0.0;
-
-	// FIFTH PASS
-	// We align all the laid out nodes in the cross axis, if needed.
-	for node in nodes.iter_mut() {
-		node.move_to_mut(iced::Point::new(main, 0.0));
-		node.align_mut(iced::Alignment::Start, iced::Alignment::Start, Size::new(0.0, cross));
-		main += node.size().width;
-	}
-
-	let size = limits.resolve(width, height, Size::new(main, cross));
-	Node::with_children(size, nodes)
 }
 
 impl<'a> From<CodeLine<'a>> for Element<'a, CodeViewMessage, iced::Theme, iced::Renderer> {
