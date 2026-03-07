@@ -78,6 +78,7 @@ impl CodeViewRenderer {
 		}
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	fn code_line(&mut self, ea: EA, text_ea: TextEA, bb_ea: EA, instn: usize, code_bytes: String,
 	mnemonic: String, operands: Vec<CodeOpData>) {
 		self.lines.push(
@@ -126,9 +127,9 @@ impl BasicBlockData {
 
 		// SAFETY: lines is never empty
 		let first_ea = &self.lines.first().unwrap().ea;
-		let last_ea = self.lines.last().unwrap().ea.clone();
-		r.func_data(first_ea.clone(), self.func);
-		r.label_line(first_ea.clone(), self.label);
+		let last_ea = self.lines.last().unwrap().ea;
+		r.func_data(*first_ea, self.func);
+		r.label_line(*first_ea, self.label);
 
 		for (instn, line) in self.lines.into_iter().enumerate() {
 			r.code_line(line.ea, line.text_ea, self.ea, instn, line.bytes, line.mnemonic,
@@ -146,7 +147,7 @@ impl UnknownData {
 		let mut r = CodeViewRenderer::new();
 
 		// SAFETY: lines is never empty
-		let last_ea = self.lines.last().unwrap().ea.clone();
+		let last_ea = self.lines.last().unwrap().ea;
 
 		for line in self.lines.into_iter() {
 			r.unknown_line(line.ea, line.text_ea, line.bytes);

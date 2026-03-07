@@ -377,6 +377,7 @@ impl<'a> CodeLine<'a> {
 	where
 		F: FnOnce(OperandLocation) -> CodeViewMessage,
 	{
+		#[allow(clippy::single_match)]
 		match self.kind {
 			LineKind::Code { bb_ea, instn, .. } => {
 				let Some(opn) = self.spans[child_idx.0].opn else {
