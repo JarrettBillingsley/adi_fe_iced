@@ -8,6 +8,18 @@
 		- `CodeLine` is a single line of code, column-based
 			- Basically that `LineKind` enum would become the kind of `CodeLine`
 			- It also supports the **virtual cursor** by knowing which column it's on
+			- It knows:
+				- How many characters are on the line
+				- For each character index, what it corresponds to
+					- like a tiny `SpanMap` of things
+					- but just implemented as a list of (char_idx, Thing) - linear search will be more than good enough cause n is unlikely to be more than 5 or so
+				- So e.g. on this line:
+					
+					PRG0:8040 03 c3 9a    jmp PRG0_loc_9AC3
+					|        <empty>          | operand 0 |
+				- This can then be used to:
+					- implement the virtual cursor (different actions depending on X position)
+					- implement mouse events (mouse X -> character index, look up what's there, send hover/leave/click events)
 		- `CodeBlock` is a list of `CodeLine`s
 			- Supports the **virtual cursor** by knowing which line it's on
 		- `CodeView` ties it all together

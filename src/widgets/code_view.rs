@@ -1,7 +1,7 @@
 use std::cell::{ RefCell };
 use std::rc::{ Rc };
 
-use iced::{ Element, widget::Column };
+use iced::{ Element, widget::{ Column } };
 
 use adi::{ EA, SegId };
 
@@ -193,20 +193,8 @@ impl CodeView {
 		}
 	}
 
-	fn render_span(&self, ea: EA) -> CodeViewItem {
-		self.backend.get_rendered_span(ea)
-	}
-
 	pub(crate) fn segid(&self) -> SegId {
 		self.id
-	}
-
-	fn ea_after(&self, ea: EA) -> Option<EA> {
-		self.backend.get_span_after(ea).map(|span| span.start())
-	}
-
-	fn ea_before(&self, ea: EA) -> Option<EA> {
-		self.backend.get_span_before(ea).map(|span| span.start())
 	}
 
 	pub(crate) fn dispatch_event(&self, ea: EA, ev: SegmentChangedEvent) {
@@ -223,7 +211,7 @@ impl CodeView {
 	}
 
 	pub(crate) fn view(&self, id: &'static str) -> Element<'_, CodeViewMessage> {
-		sparse_list(self, |_, ea: EA| self.render_span(ea).render())
+		sparse_list(self, |_, ea: EA| self.backend.get_rendered_span(ea).render())
 			.id(id)
 			.into()
 	}
@@ -252,12 +240,12 @@ impl<'a> IContent<'a, EA> for CodeView {
 
 	fn items_before(&'a self, idx: SegOffs)
 	-> Box<dyn Iterator<Item = (SegOffs, EA)> + 'a> {
-		Box::new(SpansBefore { seg: self, ea: EA::new(self.id, idx) })
+		Box::new(SpansBefore { backend: self.backend.clone(), ea: EA::new(self.id, idx) })
 	}
 
 	fn items_after(&'a self, idx: SegOffs)
 	-> Box<dyn Iterator<Item = (SegOffs, EA)> + 'a> {
-		Box::new(SpansAfter { seg: self, ea: EA::new(self.id, idx) })
+		Box::new(SpansAfter { backend: self.backend.clone(), ea: EA::new(self.id, idx) })
 	}
 
 	fn changes(&self) -> Vec<ListChange> {
@@ -265,32 +253,34 @@ impl<'a> IContent<'a, EA> for CodeView {
 	}
 }
 
-struct SpansAfter<'a> {
-	seg: &'a CodeView,
-	ea:  EA,
+struct SpansAfter {
+	backend: Rc<Backend>,
+	ea:      EA,
 }
 
-impl<'a> Iterator for SpansAfter<'a> {
+impl Iterator for SpansAfter {
 	type Item = (SegOffs, EA);
 
 	fn next(&mut self) -> Option<Self::Item> {
-		self.seg.ea_after(self.ea).map(|next_ea| {
+		self.backend.get_span_after(self.ea).map(|span| {
+			let next_ea = span.start();
 			self.ea = next_ea;
 			(next_ea.offs(), next_ea)
 		})
 	}
 }
 
-struct SpansBefore<'a> {
-	seg: &'a CodeView,
-	ea:  EA,
+struct SpansBefore {
+	backend: Rc<Backend>,
+	ea:      EA,
 }
 
-impl<'a> Iterator for SpansBefore<'a> {
+impl Iterator for SpansBefore {
 	type Item = (SegOffs, EA);
 
 	fn next(&mut self) -> Option<Self::Item> {
-		self.seg.ea_before(self.ea).map(|next_ea| {
+		self.backend.get_span_before(self.ea).map(|span| {
+			let next_ea = span.start();
 			self.ea = next_ea;
 			(next_ea.offs(), next_ea)
 		})
