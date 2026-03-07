@@ -28,7 +28,7 @@ pub(crate) struct OperandLocation {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CodeViewMessage {
 	OperandHovered { loc: OperandLocation, over: bool },
-	OperandClicked { loc: OperandLocation },
+	OperandClicked { loc: OperandLocation, double: bool },
 	JumpTo { ea: EA },
 	SwitchSegment { id: SegId },
 	JumpToTop,

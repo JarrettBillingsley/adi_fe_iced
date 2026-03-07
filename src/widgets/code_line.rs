@@ -1,15 +1,16 @@
 
 use iced_core::{
-	Widget, Layout, Rectangle,
-	widget::{ Tree, tree::{ Tag, State as TreeState } },
-	mouse::{ Cursor },
+	Renderer, Widget, Layout, Rectangle, Point, Vector, Shell, Clipboard, overlay,
+	widget::{ self, Tree, tree::{ Tag, State as TreeState } },
+	mouse::{ self, Cursor, Button as MouseButton, Click, Event as MouseEvent,
+		click::Kind as ClickKind },
 	layout::{ Limits, Node },
-	renderer::{ Style },
+	renderer::{ self, Style },
 };
 
 use iced::{
-	Element, Color as IcedColor, color, Size, Length, Theme,
-	widget::{ text, mouse_area, },
+	Element, Color as IcedColor, color, Size, Length, Theme, Event,
+	widget::{ text, },
 };
 
 use adi::{ EA, PrintStyle };
@@ -79,8 +80,64 @@ fn color_of(style: impl Into<PrintStyleEx>) -> IcedColor {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Rendering helpers
+// State
 // ------------------------------------------------------------------------------------------------
+
+struct State {
+	content_bounds: Rectangle,
+	layouts:        Vec<Node>,
+	hovered_child:  Option<ChildIdx>,
+	pressed_child:  Option<ChildIdx>,
+	previous_click: Option<Click>,
+}
+
+impl State {
+	fn needs_layout(&self) -> bool {
+		self.layouts.is_empty()
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// Building children
+// ------------------------------------------------------------------------------------------------
+
+struct LinePiece {
+	text:  String,
+	style: PrintStyleEx,
+	opn:   Option<u8>,
+}
+
+impl LinePiece {
+	fn new(text: impl Into<String>, style: impl Into<PrintStyleEx>) -> Self {
+		Self {
+			text: text.into(),
+			style: style.into(),
+			opn: None,
+		}
+	}
+
+	fn new_op(text: impl Into<String>, style: impl Into<PrintStyleEx>, opn: u8) -> Self {
+		Self {
+			text: text.into(),
+			style: style.into(),
+			opn: Some(opn),
+		}
+	}
+}
+
+#[allow(unused)]
+struct LineSpan {
+	/// 0-based character index of where this span starts, measured from left side of line
+	start: usize,
+
+	/// if this is an operand, Some(operand_idx)
+	opn:   Option<u8>,
+}
+
+struct LineChildren<'a> {
+	children: Vec<Element<'a, CodeViewMessage>>,
+	spans:    Vec<LineSpan>,
+}
 
 fn codetext(s: impl Into<String>, style: impl Into<PrintStyleEx>)
 -> Element<'static, CodeViewMessage> {
@@ -90,19 +147,18 @@ fn codetext(s: impl Into<String>, style: impl Into<PrintStyleEx>)
 		.into()
 }
 
-// ------------------------------------------------------------------------------------------------
-// State
-// ------------------------------------------------------------------------------------------------
+fn build_children<'a>(pieces: Vec<LinePiece>) -> LineChildren<'a> {
+	let mut children = Vec::with_capacity(pieces.len());
+	let mut spans    = Vec::with_capacity(pieces.len());
+	let mut start    = 0;
 
-struct State {
-	content_bounds: Rectangle,
-	layouts:        Vec<Node>,
-}
-
-impl State {
-	fn needs_layout(&self) -> bool {
-		self.layouts.is_empty()
+	for LinePiece { text, style, opn } in pieces.into_iter() {
+		spans.push(LineSpan { start, opn });
+		start += text.len();
+		children.push(codetext(text, style));
 	}
+
+	LineChildren { children, spans }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -132,23 +188,27 @@ enum LineKind {
 
 #[allow(unused)]
 pub(crate) struct CodeLine<'a> {
-	width:   Length,
-	height:  Length,
+	width:    Length,
+	height:   Length,
 	children: Vec<Element<'a, CodeViewMessage>>,
+	spans:    Vec<LineSpan>,
 
-	ea:      EA,
-	text_ea: Option<(ChildIdx, ChildIdx)>,
-	kind:    LineKind,
+	ea:       EA,
+	text_ea:  Option<(ChildIdx, ChildIdx)>,
+	kind:     LineKind,
 }
 
-#[allow(unused)]
 impl<'a> CodeLine<'a> {
 	pub(crate) fn new_blank(ea: EA) -> Self {
-		let children = vec![codetext("", PrintStyleEx::Plain)];
+		let LineChildren { children, spans } = build_children(vec![
+			LinePiece::new("", PrintStyleEx::Plain),
+		]);
+
 		Self {
 			width: Length::Shrink,
 			height: Length::Shrink,
 			children,
+			spans,
 			ea,
 			text_ea: None,
 			kind: LineKind::Blank { dummy: ChildIdx(0) },
@@ -156,16 +216,17 @@ impl<'a> CodeLine<'a> {
 	}
 
 	pub(crate) fn new_error(ea: EA, text_ea: TextEA, message: String) -> Self {
-		let children = vec![
-			codetext(text_ea.seg,                   PrintStyleEx::SegName), // 0
-			codetext(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
-			codetext(message,                       PrintStyleEx::Error),   // 2
-		];
+		let LineChildren { children, spans } = build_children(vec![
+			LinePiece::new(text_ea.seg,                   PrintStyleEx::SegName), // 0
+			LinePiece::new(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
+			LinePiece::new(message,                       PrintStyleEx::Error),   // 2
+		]);
 
 		Self {
 			width: Length::Shrink,
 			height: Length::Shrink,
 			children,
+			spans,
 			ea,
 			text_ea: Some((ChildIdx(0), ChildIdx(1))),
 			kind: LineKind::Error { message: ChildIdx(2) },
@@ -173,13 +234,14 @@ impl<'a> CodeLine<'a> {
 	}
 
 	pub(crate) fn new_comment(ea: EA, comment: String) -> Self {
-		let children = vec![
-			codetext(format!("; {}", comment), PrintStyle::Comment), // 0
-		];
+		let LineChildren { children, spans } = build_children(vec![
+			LinePiece::new(format!("; {}", comment), PrintStyle::Comment), // 0
+		]);
 		Self {
 			width: Length::Shrink,
 			height: Length::Shrink,
 			children,
+			spans,
 			ea,
 			text_ea: None,
 			kind: LineKind::Comment { comment: ChildIdx(0) },
@@ -188,15 +250,16 @@ impl<'a> CodeLine<'a> {
 
 	pub(crate) fn new_label(ea: EA, label: String) -> Self {
 		assert!(!label.is_empty());
-		let children = vec![
-			codetext(label, PrintStyle::Label),   // 0
-			codetext(":",   PrintStyleEx::Plain), // 1
-		];
+		let LineChildren { children, spans } = build_children(vec![
+			LinePiece::new(label, PrintStyle::Label),   // 0
+			LinePiece::new(":",   PrintStyleEx::Plain), // 1
+		]);
 
 		Self {
 			width: Length::Shrink,
 			height: Length::Shrink,
 			children,
+			spans,
 			ea,
 			text_ea: None,
 			kind: LineKind::Label { label: ChildIdx(0) },
@@ -207,30 +270,25 @@ impl<'a> CodeLine<'a> {
 	mnemonic: String, operands: Vec<CodeOpData>) -> Self {
 		let code_bytes = format!("{:8}     ", code_bytes);
 		let mut children = vec![
-			codetext(text_ea.seg,                   PrintStyleEx::SegName),   // 0
-			codetext(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),     // 1
-			codetext(code_bytes,                    PrintStyleEx::CodeBytes), // 2
-			codetext(mnemonic,                      PrintStyle::Mnemonic),    // 3
+			LinePiece::new(text_ea.seg,                   PrintStyleEx::SegName),   // 0
+			LinePiece::new(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),     // 1
+			LinePiece::new(code_bytes,                    PrintStyleEx::CodeBytes), // 2
+			LinePiece::new(mnemonic,                      PrintStyle::Mnemonic),    // 3
 		];
 
-		children.extend(operands.iter().map(|op| {                            // 4, 5, ...
+		children.extend(operands.iter().map(|op|                                    // 4, 5, ...
 			match op.opn {
-				Some(opn) => {
-					let loc = OperandLocation { bb_ea, instn, opn };
-					mouse_area(codetext(op.text.clone(), op.style))
-						.on_enter(CodeViewMessage::OperandHovered { loc, over: true })
-						.on_exit (CodeViewMessage::OperandHovered { loc, over: false })
-						.on_press(CodeViewMessage::OperandClicked { loc })
-						.into()
-				}
-				None => codetext(op.text.clone(), op.style),
-			}
-		}));
+				Some(opn) => LinePiece::new_op(op.text.clone(), op.style, opn),
+				None      => LinePiece::new   (op.text.clone(), op.style),
+			}));
+
+		let LineChildren { children, spans } = build_children(children);
 
 		Self {
 			width: Length::Shrink,
 			height: Length::Shrink,
 			children,
+			spans,
 			ea,
 			text_ea: Some((ChildIdx(0), ChildIdx(1))),
 			kind: LineKind::Code {
@@ -245,15 +303,16 @@ impl<'a> CodeLine<'a> {
 	}
 
 	pub(crate) fn new_unknown(ea: EA, text_ea: TextEA, bytes: String) -> Self {
-		let children = vec![
-			codetext(text_ea.seg,                   PrintStyleEx::SegName), // 0
-			codetext(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
-			codetext(bytes,                         PrintStyleEx::Unknown), // 2
-		];
+		let LineChildren { children, spans } = build_children(vec![
+			LinePiece::new(text_ea.seg,                   PrintStyleEx::SegName), // 0
+			LinePiece::new(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
+			LinePiece::new(bytes,                         PrintStyleEx::Unknown), // 2
+		]);
 		Self {
 			width: Length::Shrink,
 			height: Length::Shrink,
 			children,
+			spans,
 			ea,
 			text_ea: Some((ChildIdx(0), ChildIdx(1))),
 			kind: LineKind::Unknown { bytes: ChildIdx(2) },
@@ -301,6 +360,48 @@ impl<'a> CodeLine<'a> {
 
 		(Rectangle::with_size(Size::new(width, height)), nodes)
 	}
+
+	fn child_at_position(&self, position: Point, layout: &Layout) -> Option<ChildIdx> {
+		// log::trace!("child_at_position, position = {:?}", position);
+		for (i, layout) in layout.children().enumerate() {
+			if layout.bounds().contains(position) {
+				// log::trace!("  [{}] over bounds = {:?}", i, layout.bounds());
+				return Some(ChildIdx(i))
+			}
+		}
+		None
+	}
+
+	fn publish_child_message<F>(&self, child_idx: ChildIdx,
+	shell: &mut Shell<CodeViewMessage>, msgfn: F)
+	where
+		F: FnOnce(OperandLocation) -> CodeViewMessage,
+	{
+		match self.kind {
+			LineKind::Code { bb_ea, instn, .. } => {
+				let Some(opn) = self.spans[child_idx.0].opn else {
+					panic!("publish_child_message called on a child with no operand index");
+				};
+
+				let loc = OperandLocation { bb_ea, instn, opn };
+				shell.publish(msgfn(loc));
+			}
+			// right now, nothing. in future, might be e.g. data line which contains a reference
+			_ => {}
+		}
+	}
+
+	fn get_operand_loc(&self, child_idx: ChildIdx) -> OperandLocation {
+		match self.kind {
+			LineKind::Code { bb_ea, instn, .. } => {
+				if let Some(opn) = self.spans[child_idx.0].opn {
+					return OperandLocation { bb_ea, instn, opn };
+				}
+				panic!("get_operand_loc called on a child with no operand index");
+			}
+			_ => panic!("get_operand_loc called on a non-code line"),
+		}
+	}
 }
 
 impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
@@ -320,6 +421,9 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 		TreeState::new(State {
 			content_bounds: Rectangle::with_size(Size::ZERO),
 			layouts:        vec![],
+			hovered_child:  None,
+			pressed_child:  None,
+			previous_click: None,
 		})
 	}
 
@@ -336,7 +440,7 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 		renderer: &iced::Renderer,
 		limits: &Limits
 	) -> Node {
-		let state = tree.state.downcast_mut::<State>();
+		let state = tree.state.downcast_ref::<State>();
 
 		if state.needs_layout() {
 			let (bounds, layouts) = self.layout_children(tree, renderer, limits);
@@ -345,72 +449,137 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			state.layouts = layouts;
 		}
 
-		let state = tree.state.downcast_mut::<State>();
+		let state = tree.state.downcast_ref::<State>();
 		let size = limits.resolve(Length::Fill, Length::Fill, state.content_bounds.size());
 		Node::with_children(size, state.layouts.clone())
 	}
 
 	fn operate(
 		&mut self,
-		tree: &mut Tree,
+		_tree: &mut Tree,
 		layout: Layout<'_>,
-		renderer: &iced::Renderer,
-		operation: &mut dyn iced_core::widget::Operation,
+		_renderer: &iced::Renderer,
+		operation: &mut dyn widget::Operation,
 	) {
 		operation.container(None, layout.bounds());
-		operation.traverse(&mut |operation| {
-			self.children
-				.iter_mut()
-				.zip(&mut tree.children)
-				.zip(layout.children())
-				.for_each(|((child, state), layout)| {
-					child.as_widget_mut() .operate(state, layout, renderer, operation);
-				});
-		});
+
+		// In the future, if the children need to be operated on, here it is
+		// operation.traverse(&mut |operation| {
+		// 	self.children
+		// 		.iter_mut()
+		// 		.zip(&mut tree.children)
+		// 		.zip(layout.children())
+		// 		.for_each(|((child, state), layout)| {
+		// 			child.as_widget_mut() .operate(state, layout, renderer, operation);
+		// 		});
+		// });
 	}
 
 	fn update(
 		&mut self,
 		tree: &mut Tree,
-		event: &iced::Event,
+		event: &Event,
 		layout: Layout<'_>,
-		cursor: iced::mouse::Cursor,
-		renderer: &iced::Renderer,
-		clipboard: &mut dyn iced_core::Clipboard,
-		shell: &mut iced_core::Shell<'_, CodeViewMessage>,
-		viewport: &Rectangle,
+		cursor: Cursor,
+		_renderer: &iced::Renderer,
+		_clipboard: &mut dyn Clipboard,
+		shell: &mut Shell<'_, CodeViewMessage>,
+		_viewport: &Rectangle,
 	) {
-		for ((child, tree), layout) in self
-			.children
-			.iter_mut()
-			.zip(&mut tree.children)
-			.zip(layout.children())
-		{
-			child
-				.as_widget_mut()
-				.update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
+		let old_hovered_child = tree.state.downcast_ref::<State>().hovered_child;
+		let old_operand_loc = old_hovered_child.map(|child| self.get_operand_loc(child));
+
+		// 1. see if mouse cursor is over
+		if let Some(position) = cursor.position_over(layout.bounds()) {
+			// 2. if it is, see which child it's over
+			tree.state.downcast_mut::<State>().hovered_child = self
+				.child_at_position(position, &layout)
+				.and_then(|child_idx| {
+					if self.spans[child_idx.0].opn.is_some() {
+						Some(child_idx)
+					} else {
+						None
+					}
+				});
+		} else {
+			tree.state.downcast_mut::<State>().hovered_child = None;
 		}
+
+		// 3. from that, look at self.spans to see if we should emit messages
+		//    - hover messages (need to remember last-hovered span)
+		//    - click messages
+		//    - double-click messages
+		let state = tree.state.downcast_ref::<State>();
+		if old_hovered_child != state.hovered_child {
+			shell.request_redraw();
+
+			let new_operand_loc = state.hovered_child.map(|child| self.get_operand_loc(child));
+
+			if old_operand_loc != new_operand_loc {
+
+				if let Some(old_child) = old_hovered_child {
+					self.publish_child_message(old_child, shell,
+						|loc| CodeViewMessage::OperandHovered { loc, over: false });
+				}
+
+				if let Some(new_child) = state.hovered_child {
+					self.publish_child_message(new_child, shell,
+						|loc| CodeViewMessage::OperandHovered { loc, over: true });
+				}
+			}
+		}
+
+		let state = tree.state.downcast_mut::<State>();
+		match event {
+			Event::Mouse(MouseEvent::ButtonPressed(MouseButton::Left)) => {
+				if state.hovered_child.is_some() {
+					state.pressed_child = state.hovered_child;
+					shell.capture_event();
+				}
+			}
+			Event::Mouse(MouseEvent::ButtonReleased(MouseButton::Left)) => {
+				if let Some(child_idx) = state.pressed_child
+				&& Some(child_idx) == state.hovered_child
+				&& let Some(position) = cursor.position() {
+					let new_click = Click::new(position, MouseButton::Left, state.previous_click);
+
+					self.publish_child_message(child_idx, shell,
+						|loc| CodeViewMessage::OperandClicked {
+							loc,
+							double: new_click.kind() == ClickKind::Double,
+						});
+
+					state.previous_click = Some(new_click);
+					shell.capture_event();
+				}
+
+				state.pressed_child = None;
+			}
+			_ => {}
+		}
+
+		// In the future, if the children need to be updated, here it is
+		// for ((child, tree), layout) in self
+		// 	.children
+		// 	.iter_mut()
+		// 	.zip(&mut tree.children)
+		// 	.zip(layout.children())
+		// {
+		// 	child
+		// 		.as_widget_mut()
+		// 		.update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
+		// }
 	}
 
 	fn mouse_interaction(
 		&self,
-		tree: &Tree,
-		layout: Layout<'_>,
-		cursor: iced::mouse::Cursor,
-		viewport: &Rectangle,
-		renderer: &iced::Renderer,
-	) -> iced::mouse::Interaction {
-		self.children
-			.iter()
-			.zip(&tree.children)
-			.zip(layout.children())
-			.map(|((child, tree), layout)| {
-				child
-					.as_widget()
-					.mouse_interaction(tree, layout, cursor, viewport, renderer)
-			})
-			.max()
-			.unwrap_or_default()
+		_tree: &Tree,
+		_layout: Layout<'_>,
+		_cursor: Cursor,
+		_viewport: &Rectangle,
+		_renderer: &iced::Renderer,
+	) -> mouse::Interaction {
+		mouse::Interaction::None
 	}
 
 	fn draw(
@@ -423,37 +592,64 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 		cursor: Cursor,
 		viewport: &Rectangle
 	) {
-		if layout.bounds().intersects(viewport) {
-			for ((child, tree), layout) in self
-				.children
-				.iter()
-				.zip(&tree.children)
-				.zip(layout.children())
-				.filter(|(_, layout)| layout.bounds().intersects(viewport))
-			{
-				child
-					.as_widget()
-					.draw(tree, renderer, theme, style, layout, cursor, viewport);
-			}
+		if !layout.bounds().intersects(viewport) {
+			return;
+		}
+
+		let state = tree.state.downcast_ref::<State>();
+		let hovered_child = state.hovered_child;
+
+		if let Some(child_idx) = hovered_child {
+			let translation = layout.position() - Point::ORIGIN;
+
+			let bounds = state.layouts[child_idx.0].bounds();
+			let bounds = Rectangle::new(
+				bounds.position() - Vector::new(1.0, 1.0),
+				bounds.size() + Size::new(2.0, 2.0),
+			);
+
+			// TODO: customizable color(s) for highlight background and border
+			renderer.fill_quad(
+				renderer::Quad {
+					bounds: bounds + translation,
+					border: iced::Border {
+						color: IcedColor::WHITE,
+						width: 0.3,
+						radius: iced::border::Radius::new(4.0),
+					},
+					..Default::default()
+				},
+				IcedColor::from_rgb8(0x20, 0x20, 0x20),
+			);
+		}
+
+		for ((child, tree), layout) in self.children.iter()
+			.zip(&tree.children)
+			.zip(layout.children())
+			.filter(|(_, layout)| layout.bounds().intersects(viewport))
+		{
+			child.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
 		}
 	}
 
 	fn overlay<'b>(
 		&'b mut self,
-		tree: &'b mut Tree,
-		layout: Layout<'b>,
-		renderer: &iced::Renderer,
-		viewport: &Rectangle,
-		translation: iced::Vector,
-	) -> Option<iced_core::overlay::Element<'b, CodeViewMessage, iced::Theme, iced::Renderer>> {
-		iced_core::overlay::from_children(
-			&mut self.children,
-			tree,
-			layout,
-			renderer,
-			viewport,
-			translation,
-		)
+		_tree: &'b mut Tree,
+		_layout: Layout<'b>,
+		_renderer: &iced::Renderer,
+		_viewport: &Rectangle,
+		_translation: Vector,
+	) -> Option<overlay::Element<'b, CodeViewMessage, iced::Theme, iced::Renderer>> {
+		// could see this being used to pop up info tooltips
+		None
+		// overlay::from_children(
+		// 	&mut self.children,
+		// 	tree,
+		// 	layout,
+		// 	renderer,
+		// 	viewport,
+		// 	translation,
+		// )
 	}
 }
 

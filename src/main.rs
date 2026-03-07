@@ -290,12 +290,12 @@ impl AdiFE {
 						loc.bb_ea, loc.instn, loc.opn);
 				} else if let Some(cur_operand) = self.cur_operand && cur_operand == loc {
 					self.cur_operand = None;
-					println!("TODO: stopped hovering over BB {:?} instruction #{} operand #{}",
-						loc.bb_ea, loc.instn, loc.opn);
+					println!("TODO: hovering over nothing");
 				}
 			}
-			OperandClicked { loc } => {
-				println!("TODO: clicked BB {:?} instruction #{} operand #{}",
+			OperandClicked { loc, double } => {
+				println!("TODO: {}-clicked BB {:?} instruction #{} operand #{}",
+					if double { "double" } else { "single" },
 					loc.bb_ea, loc.instn, loc.opn);
 			}
 			JumpTo { ea } => {
