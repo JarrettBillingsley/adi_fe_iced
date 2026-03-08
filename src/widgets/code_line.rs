@@ -80,24 +80,6 @@ fn color_of(style: impl Into<PrintStyleEx>) -> IcedColor {
 }
 
 // ------------------------------------------------------------------------------------------------
-// State
-// ------------------------------------------------------------------------------------------------
-
-struct State {
-	content_bounds: Rectangle,
-	layouts:        Vec<Node>,
-	hovered_child:  Option<ChildIdx>,
-	pressed_child:  Option<ChildIdx>,
-	previous_click: Option<Click>,
-}
-
-impl State {
-	fn needs_layout(&self) -> bool {
-		self.layouts.is_empty()
-	}
-}
-
-// ------------------------------------------------------------------------------------------------
 // Building children
 // ------------------------------------------------------------------------------------------------
 
@@ -130,6 +112,9 @@ struct LineSpan {
 	/// 0-based character index of where this span starts, measured from left side of line
 	start: usize,
 
+	/// how many characters are in this span
+	len:   usize,
+
 	/// if this is an operand, Some(operand_idx)
 	opn:   Option<u8>,
 }
@@ -153,7 +138,7 @@ fn build_children<'a>(pieces: Vec<LinePiece>) -> LineChildren<'a> {
 	let mut start    = 0;
 
 	for LinePiece { text, style, opn } in pieces.into_iter() {
-		spans.push(LineSpan { start, opn });
+		spans.push(LineSpan { start, len: text.len(), opn });
 		start += text.len();
 		children.push(codetext(text, style));
 	}
@@ -162,7 +147,7 @@ fn build_children<'a>(pieces: Vec<LinePiece>) -> LineChildren<'a> {
 }
 
 // ------------------------------------------------------------------------------------------------
-// LineKind, CodeLine
+// LineKind
 // ------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -185,6 +170,10 @@ enum LineKind {
 	Unknown { bytes: ChildIdx },
 	// TODO: data
 }
+
+// ------------------------------------------------------------------------------------------------
+// CodeLine
+// ------------------------------------------------------------------------------------------------
 
 #[allow(unused)]
 pub(crate) struct CodeLine<'a> {
@@ -403,7 +392,49 @@ impl<'a> CodeLine<'a> {
 			_ => panic!("get_operand_loc called on a non-code line"),
 		}
 	}
+
+	fn position_to_cursor(&self, position: Point, layout: &Layout) -> Option<(usize, Rectangle)> {
+		for (span, layout) in self.spans.iter().zip(layout.children()) {
+			let bounds = layout.bounds();
+			if bounds.contains(position) {
+				let bounds_size   = bounds.size();
+				let char_width    = bounds_size.width / span.len as f32;
+				let position_in   = position - bounds.position();
+				let idx           = (position_in.x / char_width) as usize;
+				let bounds_pos    = bounds.position();
+				let cursor_bounds = Rectangle::new(
+					Point::new(bounds_pos.x + (idx as f32) * char_width, bounds_pos.y),
+					Size::new(char_width, bounds_size.height)
+				);
+				return Some((span.start + idx, cursor_bounds));
+			}
+		}
+		None
+	}
 }
+
+// ------------------------------------------------------------------------------------------------
+// State
+// ------------------------------------------------------------------------------------------------
+
+struct State {
+	content_bounds: Rectangle,
+	layouts:        Vec<Node>,
+	hovered_child:  Option<ChildIdx>,
+	pressed_child:  Option<ChildIdx>,
+	previous_click: Option<Click>,
+	cursor_column:  Option<(usize, Rectangle)>,
+}
+
+impl State {
+	fn needs_layout(&self) -> bool {
+		self.layouts.is_empty()
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// Widget implementation
+// ------------------------------------------------------------------------------------------------
 
 impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 	fn children(&self) -> Vec<Tree> {
@@ -425,6 +456,7 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			hovered_child:  None,
 			pressed_child:  None,
 			previous_click: None,
+			cursor_column:  None,
 		})
 	}
 
@@ -489,9 +521,10 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 	) {
 		let old_hovered_child = tree.state.downcast_ref::<State>().hovered_child;
 		let old_operand_loc = old_hovered_child.map(|child| self.get_operand_loc(child));
+		let position_over = cursor.position_over(layout.bounds());
 
 		// 1. see if mouse cursor is over
-		if let Some(position) = cursor.position_over(layout.bounds()) {
+		if let Some(position) = position_over {
 			// 2. if it is, see which child it's over
 			tree.state.downcast_mut::<State>().hovered_child = self
 				.child_at_position(position, &layout)
@@ -539,19 +572,26 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 				}
 			}
 			Event::Mouse(MouseEvent::ButtonReleased(MouseButton::Left)) => {
-				if let Some(child_idx) = state.pressed_child
-				&& Some(child_idx) == state.hovered_child
-				&& let Some(position) = cursor.position() {
-					let new_click = Click::new(position, MouseButton::Left, state.previous_click);
+				if let Some(position) = cursor.position() {
+					if position_over.is_some() {
+						state.cursor_column = self.position_to_cursor(position, &layout);
+						shell.request_redraw();
+					}
 
-					self.publish_child_message(child_idx, shell,
-						|loc| CodeViewMessage::OperandClicked {
-							loc,
-							double: new_click.kind() == ClickKind::Double,
-						});
+					if let Some(child_idx) = state.pressed_child
+					&& Some(child_idx) == state.hovered_child {
+						let new_click =
+							Click::new(position, MouseButton::Left, state.previous_click);
 
-					state.previous_click = Some(new_click);
-					shell.capture_event();
+						self.publish_child_message(child_idx, shell,
+							|loc| CodeViewMessage::OperandClicked {
+								loc,
+								double: new_click.kind() == ClickKind::Double,
+							});
+
+						state.previous_click = Some(new_click);
+						shell.capture_event();
+					}
 				}
 
 				state.pressed_child = None;
@@ -598,11 +638,9 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 		}
 
 		let state = tree.state.downcast_ref::<State>();
-		let hovered_child = state.hovered_child;
+		let translation = layout.position() - Point::ORIGIN;
 
-		if let Some(child_idx) = hovered_child {
-			let translation = layout.position() - Point::ORIGIN;
-
+		if let Some(child_idx) = state.hovered_child {
 			let bounds = state.layouts[child_idx.0].bounds();
 			let bounds = Rectangle::new(
 				bounds.position() - Vector::new(1.0, 1.0),
@@ -614,13 +652,34 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 				renderer::Quad {
 					bounds: bounds + translation,
 					border: iced::Border {
-						color: IcedColor::WHITE,
-						width: 0.3,
-						radius: iced::border::Radius::new(4.0),
+						color:  IcedColor::from_rgb8(0x90, 0x90, 0x90),
+						width:  1.0,
+						radius: iced::border::Radius::new(0.0),
 					},
 					..Default::default()
 				},
 				IcedColor::from_rgb8(0x20, 0x20, 0x20),
+			);
+		}
+
+		if let Some((_, bounds)) = state.cursor_column {
+			let bounds = Rectangle::new(
+				bounds.position() - Vector::new(1.0, 0.0),
+				bounds.size() + Size::new(2.0, 0.0),
+			);
+
+			// TODO: customizable color for cursor
+			renderer.fill_quad(
+				renderer::Quad {
+					bounds,
+					border: iced::Border {
+						color:  IcedColor::WHITE,
+						width:  1.0,
+						radius: iced::border::Radius::new(0.0),
+					},
+					..Default::default()
+				},
+				IcedColor::from_rgb8(0x00, 0x00, 0x00),
 			);
 		}
 
