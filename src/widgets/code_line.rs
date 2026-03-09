@@ -4,6 +4,7 @@ use iced_core::{
 	widget::{ self, Tree, tree::{ Tag, State as TreeState } },
 	mouse::{ self, Cursor, Button as MouseButton, Click, Event as MouseEvent,
 		click::Kind as ClickKind },
+	keyboard::{ Event as KeyboardEvent, Modifiers as KeyModifiers, Key, key::Named as NamedKey },
 	layout::{ Limits, Node },
 	renderer::{ self, Style },
 };
@@ -120,8 +121,9 @@ struct LineSpan {
 }
 
 struct LineChildren<'a> {
-	children: Vec<Element<'a, CodeViewMessage>>,
-	spans:    Vec<LineSpan>,
+	total_len: usize,
+	children:  Vec<Element<'a, CodeViewMessage>>,
+	spans:     Vec<LineSpan>,
 }
 
 fn codetext(s: impl Into<String>, style: impl Into<PrintStyleEx>)
@@ -133,9 +135,9 @@ fn codetext(s: impl Into<String>, style: impl Into<PrintStyleEx>)
 }
 
 fn build_children<'a>(pieces: Vec<LinePiece>) -> LineChildren<'a> {
-	let mut children = Vec::with_capacity(pieces.len());
-	let mut spans    = Vec::with_capacity(pieces.len());
-	let mut start    = 0;
+	let mut children  = Vec::with_capacity(pieces.len());
+	let mut spans     = Vec::with_capacity(pieces.len());
+	let mut start     = 0;
 
 	for LinePiece { text, style, opn } in pieces.into_iter() {
 		spans.push(LineSpan { start, len: text.len(), opn });
@@ -143,7 +145,7 @@ fn build_children<'a>(pieces: Vec<LinePiece>) -> LineChildren<'a> {
 		children.push(codetext(text, style));
 	}
 
-	LineChildren { children, spans }
+	LineChildren { total_len: start, children, spans }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -177,82 +179,78 @@ enum LineKind {
 
 #[allow(unused)]
 pub(crate) struct CodeLine<'a> {
-	width:    Length,
-	height:   Length,
-	children: Vec<Element<'a, CodeViewMessage>>,
-	spans:    Vec<LineSpan>,
+	width:     Length,
+	height:    Length,
+	children:  Vec<Element<'a, CodeViewMessage>>,
+	spans:     Vec<LineSpan>,
+	total_len: usize,
 
-	ea:       EA,
-	text_ea:  Option<(ChildIdx, ChildIdx)>,
-	kind:     LineKind,
+	ea:        EA,
+	text_ea:   Option<(ChildIdx, ChildIdx)>,
+	kind:      LineKind,
 }
 
 impl<'a> CodeLine<'a> {
-	pub(crate) fn new_blank(ea: EA) -> Self {
-		let LineChildren { children, spans } = build_children(vec![
-			LinePiece::new("", PrintStyleEx::Plain),
-		]);
+	// --------------------------------------------------------------------------------------------
+	// Constructors
 
+	fn new(ea: EA, text_ea: Option<(ChildIdx, ChildIdx)>, children: LineChildren<'a>,
+	kind: LineKind) -> Self {
+		assert!(!children.children.is_empty());
 		Self {
-			width: Length::Shrink,
-			height: Length::Shrink,
-			children,
-			spans,
+			width:     Length::Shrink,
+			height:    Length::Shrink,
+			children:  children.children,
+			spans:     children.spans,
+			total_len: children.total_len,
 			ea,
-			text_ea: None,
-			kind: LineKind::Blank { dummy: ChildIdx(0) },
+			text_ea,
+			kind,
 		}.adjust_size()
+	}
+
+	pub(crate) fn new_blank(ea: EA) -> Self {
+		Self::new(ea, None,
+			build_children(vec![
+				LinePiece::new("", PrintStyleEx::Plain), // 0
+			]),
+			LineKind::Blank {
+				dummy: ChildIdx(0),
+			})
 	}
 
 	pub(crate) fn new_error(ea: EA, text_ea: TextEA, message: String) -> Self {
-		let LineChildren { children, spans } = build_children(vec![
-			LinePiece::new(text_ea.seg,                   PrintStyleEx::SegName), // 0
-			LinePiece::new(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
-			LinePiece::new(message,                       PrintStyleEx::Error),   // 2
-		]);
-
-		Self {
-			width: Length::Shrink,
-			height: Length::Shrink,
-			children,
-			spans,
-			ea,
-			text_ea: Some((ChildIdx(0), ChildIdx(1))),
-			kind: LineKind::Error { message: ChildIdx(2) },
-		}.adjust_size()
+		Self::new(ea, Some((ChildIdx(0), ChildIdx(1))),
+			build_children(vec![
+				LinePiece::new(text_ea.seg,                   PrintStyleEx::SegName), // 0
+				LinePiece::new(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
+				LinePiece::new(message,                       PrintStyleEx::Error),   // 2
+			]),
+			LineKind::Error {
+				message: ChildIdx(2),
+			})
 	}
 
 	pub(crate) fn new_comment(ea: EA, comment: String) -> Self {
-		let LineChildren { children, spans } = build_children(vec![
-			LinePiece::new(format!("; {}", comment), PrintStyle::Comment), // 0
-		]);
-		Self {
-			width: Length::Shrink,
-			height: Length::Shrink,
-			children,
-			spans,
-			ea,
-			text_ea: None,
-			kind: LineKind::Comment { comment: ChildIdx(0) },
-		}.adjust_size()
+		Self::new(ea, None,
+			build_children(vec![
+				LinePiece::new(format!("; {}", comment), PrintStyle::Comment), // 0
+			]),
+			LineKind::Comment {
+				comment: ChildIdx(0),
+			})
 	}
 
 	pub(crate) fn new_label(ea: EA, label: String) -> Self {
 		assert!(!label.is_empty());
-		let LineChildren { children, spans } = build_children(vec![
-			LinePiece::new(label, PrintStyle::Label),   // 0
-			LinePiece::new(":",   PrintStyleEx::Plain), // 1
-		]);
-
-		Self {
-			width: Length::Shrink,
-			height: Length::Shrink,
-			children,
-			spans,
-			ea,
-			text_ea: None,
-			kind: LineKind::Label { label: ChildIdx(0) },
-		}.adjust_size()
+		Self::new(ea, None,
+			build_children(vec![
+				LinePiece::new(label, PrintStyle::Label),   // 0
+				LinePiece::new(":",   PrintStyleEx::Plain), // 1
+			]),
+			LineKind::Label {
+				label: ChildIdx(0),
+			})
 	}
 
 	pub(crate) fn new_code(ea: EA, text_ea: TextEA, bb_ea: EA, instn: usize, code_bytes: String,
@@ -265,48 +263,40 @@ impl<'a> CodeLine<'a> {
 			LinePiece::new(mnemonic,                      PrintStyle::Mnemonic),    // 3
 		];
 
+		let child_first_idx = children.len();
+
 		children.extend(operands.iter().map(|op|                                    // 4, 5, ...
 			match op.opn {
 				Some(opn) => LinePiece::new_op(op.text.clone(), op.style, opn),
 				None      => LinePiece::new   (op.text.clone(), op.style),
 			}));
 
-		let LineChildren { children, spans } = build_children(children);
-
-		Self {
-			width: Length::Shrink,
-			height: Length::Shrink,
-			children,
-			spans,
-			ea,
-			text_ea: Some((ChildIdx(0), ChildIdx(1))),
-			kind: LineKind::Code {
+		Self::new(ea, Some((ChildIdx(0), ChildIdx(1))),
+			build_children(children),
+			LineKind::Code {
 				bb_ea,
 				instn,
 				code_bytes: ChildIdx(2),
 				mnemonic:   ChildIdx(3),
 				operands: operands.into_iter().enumerate()
-					.map(|(i, op)| (op, ChildIdx(4 + i))).collect()
-			},
-		}.adjust_size()
+					.map(|(i, op)| (op, ChildIdx(child_first_idx + i))).collect()
+			})
 	}
 
 	pub(crate) fn new_unknown(ea: EA, text_ea: TextEA, bytes: String) -> Self {
-		let LineChildren { children, spans } = build_children(vec![
-			LinePiece::new(text_ea.seg,                   PrintStyleEx::SegName), // 0
-			LinePiece::new(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
-			LinePiece::new(bytes,                         PrintStyleEx::Unknown), // 2
-		]);
-		Self {
-			width: Length::Shrink,
-			height: Length::Shrink,
-			children,
-			spans,
-			ea,
-			text_ea: Some((ChildIdx(0), ChildIdx(1))),
-			kind: LineKind::Unknown { bytes: ChildIdx(2) },
-		}.adjust_size()
+		Self::new(ea, Some((ChildIdx(0), ChildIdx(1))),
+			build_children(vec![
+				LinePiece::new(text_ea.seg,                   PrintStyleEx::SegName), // 0
+				LinePiece::new(format!(":{} ", text_ea.offs), PrintStyleEx::Plain),   // 1
+				LinePiece::new(bytes,                         PrintStyleEx::Unknown), // 2
+			]),
+			LineKind::Unknown {
+				bytes: ChildIdx(2),
+			})
 	}
+
+	// --------------------------------------------------------------------------------------------
+	// Layout stuff
 
 	fn adjust_size(mut self) -> Self {
 		let (mut width, mut height) = (self.width, self.height);
@@ -350,15 +340,25 @@ impl<'a> CodeLine<'a> {
 		(Rectangle::with_size(Size::new(width, height)), nodes)
 	}
 
-	fn child_at_position(&self, position: Point, layout: &Layout) -> Option<ChildIdx> {
-		// log::trace!("child_at_position, position = {:?}", position);
-		for (i, layout) in layout.children().enumerate() {
-			if layout.bounds().contains(position) {
-				// log::trace!("  [{}] over bounds = {:?}", i, layout.bounds());
-				return Some(ChildIdx(i))
+	fn char_width(&self, root_layout: &Layout) -> f32 {
+		// this feels janktastic but it works.
+		// SAFETY: always have children
+		root_layout.children().nth(0).unwrap().bounds().width / self.spans[0].len as f32
+	}
+
+	// --------------------------------------------------------------------------------------------
+	// Message stuff
+
+	fn get_operand_loc(&self, child_idx: ChildIdx) -> OperandLocation {
+		match self.kind {
+			LineKind::Code { bb_ea, instn, .. } => {
+				if let Some(opn) = self.spans[child_idx.0].opn {
+					return OperandLocation { bb_ea, instn, opn };
+				}
+				panic!("get_operand_loc called on a child with no operand index");
 			}
+			_ => panic!("get_operand_loc called on a non-code line"),
 		}
-		None
 	}
 
 	fn publish_child_message<F>(&self, child_idx: ChildIdx,
@@ -381,41 +381,56 @@ impl<'a> CodeLine<'a> {
 		}
 	}
 
-	fn get_operand_loc(&self, child_idx: ChildIdx) -> OperandLocation {
-		match self.kind {
-			LineKind::Code { bb_ea, instn, .. } => {
-				if let Some(opn) = self.spans[child_idx.0].opn {
-					return OperandLocation { bb_ea, instn, opn };
-				}
-				panic!("get_operand_loc called on a child with no operand index");
-			}
-			_ => panic!("get_operand_loc called on a non-code line"),
-		}
-	}
+	// --------------------------------------------------------------------------------------------
+	// Cursor stuff
 
-	fn position_to_cursor(&self, position: Point, layout: &Layout) -> Option<(usize, Rectangle)> {
-		for (span, layout) in self.spans.iter().zip(layout.children()) {
-			let bounds = layout.bounds();
-			if bounds.contains(position) {
-				let bounds_size   = bounds.size();
-				let char_width    = bounds_size.width / span.len as f32;
-				let position_in   = position - bounds.position();
-				let idx           = (position_in.x / char_width) as usize;
-				let bounds_pos    = bounds.position();
-				let cursor_bounds = Rectangle::new(
-					Point::new(bounds_pos.x + (idx as f32) * char_width, bounds_pos.y),
-					Size::new(char_width, bounds_size.height)
-				);
-				return Some((span.start + idx, cursor_bounds));
+	fn child_at_position(&self, position: Point, layout: &Layout) -> Option<ChildIdx> {
+		for (i, layout) in layout.children().enumerate() {
+			if layout.bounds().contains(position) {
+				return Some(ChildIdx(i))
 			}
 		}
 		None
 	}
+
+	fn position_to_cursor(&self, position: Point, layout: &Layout) -> LineCursor {
+		assert!(layout.bounds().contains(position));
+
+		let bounds      = layout.bounds();
+		let char_width  = self.char_width(layout);
+		let position_in = position - bounds.position();
+		let idx         = (position_in.x / char_width) as usize;
+		LineCursor {
+			idx,
+			bounds: Rectangle::new(
+				bounds.position() + Vector::new((idx as f32) * char_width, 0.0),
+				Size::new(char_width, bounds.height)
+			)
+		}
+	}
+
+	fn idx_to_cursor(&self, idx: usize, layout: &Layout) -> LineCursor {
+		let bounds = layout.bounds();
+		let char_width = self.char_width(layout);
+
+		LineCursor {
+			idx,
+			bounds: Rectangle::new(
+				bounds.position() + Vector::new((idx as f32) * char_width, 0.0),
+				Size::new(char_width, bounds.height)
+			)
+		}
+	}
 }
 
 // ------------------------------------------------------------------------------------------------
-// State
+// State, LineCursor
 // ------------------------------------------------------------------------------------------------
+
+struct LineCursor {
+	idx:    usize,
+	bounds: Rectangle,
+}
 
 struct State {
 	content_bounds: Rectangle,
@@ -423,7 +438,7 @@ struct State {
 	hovered_child:  Option<ChildIdx>,
 	pressed_child:  Option<ChildIdx>,
 	previous_click: Option<Click>,
-	cursor_column:  Option<(usize, Rectangle)>,
+	line_cursor:    Option<LineCursor>,
 }
 
 impl State {
@@ -456,7 +471,7 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			hovered_child:  None,
 			pressed_child:  None,
 			previous_click: None,
-			cursor_column:  None,
+			line_cursor:    None,
 		})
 	}
 
@@ -574,7 +589,7 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			Event::Mouse(MouseEvent::ButtonReleased(MouseButton::Left)) => {
 				if let Some(position) = cursor.position() {
 					if position_over.is_some() {
-						state.cursor_column = self.position_to_cursor(position, &layout);
+						state.line_cursor = Some(self.position_to_cursor(position, &layout));
 						shell.request_redraw();
 					}
 
@@ -595,6 +610,29 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 				}
 
 				state.pressed_child = None;
+			}
+			Event::Keyboard(KeyboardEvent::KeyPressed { key, modifiers, .. })
+			if *modifiers == KeyModifiers::NONE => {
+				let state = tree.state.downcast_mut::<State>();
+
+				if let Some(line_cursor) = &mut state.line_cursor {
+					match key {
+						// TODO: hold ctrl for moving left and right by span
+						Key::Named(NamedKey::ArrowLeft) => {
+							if line_cursor.idx > 0 {
+								*line_cursor = self.idx_to_cursor(line_cursor.idx - 1, &layout);
+								shell.request_redraw();
+							}
+						}
+						Key::Named(NamedKey::ArrowRight) => {
+							if line_cursor.idx < self.total_len - 1 {
+								*line_cursor = self.idx_to_cursor(line_cursor.idx + 1, &layout);
+								shell.request_redraw();
+							}
+						}
+						_ => {}
+					}
+				}
 			}
 			_ => {}
 		}
@@ -662,7 +700,7 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			);
 		}
 
-		if let Some((_, bounds)) = state.cursor_column {
+		if let Some(LineCursor { bounds, .. }) = state.line_cursor {
 			let bounds = Rectangle::new(
 				bounds.position() - Vector::new(1.0, 0.0),
 				bounds.size() + Size::new(2.0, 0.0),
