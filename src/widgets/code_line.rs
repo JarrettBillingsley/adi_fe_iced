@@ -492,6 +492,42 @@ impl<'a> CodeLine<'a> {
 		}
 	}
 
+	/// Tries to move `line_cursor.idx` ahead or back by `delta` spans; returns `true` if the
+	/// cursor moved.
+	fn move_cursor_by_span(&self, line_cursor: &mut LineCursor, delta: isize, layout: &Layout)
+	-> bool {
+		let old_child_idx = match self.child_at_char_index(line_cursor.idx) {
+			None                => self.spans.len(),
+			Some(ChildIdx(idx)) => idx,
+		};
+
+		let new_child_idx = (old_child_idx as isize + delta)
+			.clamp(0, self.spans.len() as isize) as usize;
+
+		let new_idx = if new_child_idx < self.spans.len() {
+			self.spans[new_child_idx].start
+		} else {
+			self.total_len
+		};
+
+		if new_idx != line_cursor.idx {
+			*line_cursor = self.compute_line_cursor(layout, |_, _| new_idx);
+			true
+		} else {
+			false
+		}
+	}
+
+	/// Tries to position `line_cursor.idx` at `idx`; returns `true` if the cursor moved.
+	fn position_cursor(&self, line_cursor: &mut LineCursor, idx: usize, layout: &Layout) -> bool {
+		if idx != line_cursor.idx {
+			*line_cursor = self.compute_line_cursor(layout, |_, _| idx);
+			true
+		} else {
+			false
+		}
+	}
+
 	fn compute_line_cursor<F>(&self, layout: &Layout, idxfn: F) -> LineCursor
 	where
 		F: Fn(Rectangle, Option<f32>) -> usize,
@@ -717,32 +753,37 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			// Check for keyboard cursor movement
 
 			Event::Keyboard(KeyboardEvent::KeyPressed { key, modifiers, .. })
-			if *modifiers == KeyModifiers::NONE => {
+			if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::CTRL) => {
 				// TODO: this code is extremely similar to the hovering code above. possible to
 				// abstract it?
 				let old_focused_child = state.focused_child;
 				let old_focused_loc   = self.operand_loc_of(old_focused_child);
 
 				if let Some(line_cursor) = &mut state.line_cursor {
-					match key {
-						// TODO: hold ctrl for moving left and right by span
-						// TODO: home/end
-						Key::Named(NamedKey::ArrowLeft) => {
-							if self.move_cursor(line_cursor, -1, &layout) {
-								shell.request_redraw();
-							}
-						}
-						Key::Named(NamedKey::ArrowRight) => {
-							if self.move_cursor(line_cursor, 1, &layout) {
-								shell.request_redraw();
-							}
-						}
-						Key::Named(NamedKey::Enter) => {
+					let should_redraw = match (*modifiers, key) {
+						(KeyModifiers::NONE, Key::Named(NamedKey::ArrowLeft)) =>
+							self.move_cursor(line_cursor, -1, &layout),
+						(KeyModifiers::NONE, Key::Named(NamedKey::ArrowRight)) =>
+							self.move_cursor(line_cursor, 1, &layout),
+						(KeyModifiers::CTRL, Key::Named(NamedKey::ArrowLeft)) =>
+							self.move_cursor_by_span(line_cursor, -1, &layout),
+						(KeyModifiers::CTRL, Key::Named(NamedKey::ArrowRight)) =>
+							self.move_cursor_by_span(line_cursor, 1, &layout),
+						(KeyModifiers::NONE, Key::Named(NamedKey::Home)) =>
+							self.position_cursor(line_cursor, 0, &layout),
+						(KeyModifiers::NONE, Key::Named(NamedKey::End)) =>
+							self.position_cursor(line_cursor, self.total_len, &layout),
+						(KeyModifiers::NONE, Key::Named(NamedKey::Enter)) => {
 							self.maybe_publish_child_message(
-								self.operand_at_char_index(line_cursor.idx), shell,
-								CodeViewMessage::operand_pressed);
+								self.operand_at_char_index(line_cursor.idx),
+								shell, CodeViewMessage::operand_pressed);
+							false
 						}
-						_ => {}
+						_ => false,
+					};
+
+					if should_redraw {
+						shell.request_redraw();
 					}
 				}
 
