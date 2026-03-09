@@ -309,6 +309,10 @@ impl AdiFE {
 					println!("TODO: text cursor over nothing");
 				}
 			}
+			OperandPressed { loc } => {
+				println!("TODO: pressed enter on BB {:?} instruction #{} operand #{}",
+					loc.bb_ea, loc.instn, loc.opn);
+			}
 			JumpTo { ea } => {
 				self.code_pane_mut().set_segment(ea.seg());
 

@@ -34,6 +34,8 @@ pub(crate) enum CodeViewMessage {
 	OperandClicked { loc: OperandLocation, double: bool },
 	/// The text cursor either moved onto an operand (if `over` is `true`) or moved off of one.
 	OperandFocused { loc: OperandLocation, over: bool },
+	/// The text cursor is over and operand and the user pressed Enter.
+	OperandPressed { loc: OperandLocation },
 	/// Jump to an EA (focus it in the `CodeView`).
 	JumpTo { ea: EA },
 	/// Switch which segment the `CodeView` is viewing. Jumps to the first EA of the segment.
@@ -44,6 +46,28 @@ pub(crate) enum CodeViewMessage {
 	JumpToBottom,
 	/// FOR TESTING: scroll the `CodeView` up or down a bit.
 	Scroll { up: bool },
+}
+
+impl CodeViewMessage {
+	pub(crate) fn operand_hovered_over(loc: OperandLocation) -> Self {
+		Self::OperandHovered { loc, over: true }
+	}
+
+	pub(crate) fn operand_hovered_out(loc: OperandLocation) -> Self {
+		Self::OperandHovered { loc, over: false }
+	}
+
+	pub(crate) fn operand_focused_over(loc: OperandLocation) -> Self {
+		Self::OperandFocused { loc, over: true }
+	}
+
+	pub(crate) fn operand_focused_out(loc: OperandLocation) -> Self {
+		Self::OperandFocused { loc, over: false }
+	}
+
+	pub(crate) fn operand_pressed(loc: OperandLocation) -> Self {
+		Self::OperandPressed { loc }
+	}
 }
 
 // ------------------------------------------------------------------------------------------------

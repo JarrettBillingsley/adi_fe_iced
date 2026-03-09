@@ -356,6 +356,9 @@ impl<'a> CodeLine<'a> {
 	// --------------------------------------------------------------------------------------------
 	// Message stuff
 
+	/// Get the operand location of a child.
+	///
+	/// Panics if this is not a code line or if called on a child that has no operand index.
 	fn get_operand_loc(&self, child_idx: ChildIdx) -> OperandLocation {
 		match self.kind {
 			LineKind::Code { bb_ea, instn, .. } => {
@@ -368,6 +371,8 @@ impl<'a> CodeLine<'a> {
 		}
 	}
 
+	/// Publish a message on the given child. `msgfn` is given the operand's location and should
+	/// return the message to be published.
 	fn publish_child_message<F>(&self, child_idx: ChildIdx,
 	shell: &mut Shell<CodeViewMessage>, msgfn: F)
 	where
@@ -388,6 +393,17 @@ impl<'a> CodeLine<'a> {
 		}
 	}
 
+	/// Same as above, but only publishes the message if `child_idx.is_some()`
+	fn maybe_publish_child_message<F>(&self, child_idx: Option<ChildIdx>,
+	shell: &mut Shell<CodeViewMessage>, msgfn: F)
+	where
+		F: FnOnce(OperandLocation) -> CodeViewMessage,
+	{
+		if let Some(child_idx) = child_idx {
+			self.publish_child_message(child_idx, shell, msgfn)
+		}
+	}
+
 	// --------------------------------------------------------------------------------------------
 	// Cursor stuff
 
@@ -405,6 +421,18 @@ impl<'a> CodeLine<'a> {
 		None
 	}
 
+	/// Like `child_at_position`, but only returns `Some` if the child has an operand index.
+	fn operand_at_position(&self, position: Point, layout: &Layout) -> Option<ChildIdx> {
+		self.child_at_position(position, &layout)
+		.and_then(|child_idx| {
+			if self.spans[child_idx.0].opn.is_some() {
+				Some(child_idx)
+			} else {
+				None
+			}
+		})
+	}
+
 	/// Get the index of the child, if any, at the given character index.
 	fn child_at_char_index(&self, char_idx: usize) -> Option<ChildIdx> {
 		let child_idx = match self.spans.binary_search_by_key(&char_idx, |span| span.start) {
@@ -417,6 +445,18 @@ impl<'a> CodeLine<'a> {
 		} else {
 			None
 		}
+	}
+
+	/// Like `child_at_char_index`, but only returns `Some` if the child has an operand index.
+	fn operand_at_char_index(&self, char_idx: usize) -> Option<ChildIdx> {
+		self.child_at_char_index(char_idx)
+		.and_then(|child_idx| {
+			if self.spans[child_idx.0].opn.is_some() {
+				Some(child_idx)
+			} else {
+				None
+			}
+		})
 	}
 
 	/// Given a `Point` inside this line's layout, compute the character index and cursor rectangle
@@ -466,6 +506,24 @@ impl<'a> CodeLine<'a> {
 				bounds.position() + Vector::new((idx as f32) * char_width, 0.0),
 				Size::new(char_width, bounds.height)
 			)
+		}
+	}
+
+	/// Maps an optional child index to an optional operand location of that child.
+	///
+	/// Panics if `idx` refers to a child that is not an operand.
+	fn operand_loc_of(&self, idx: Option<ChildIdx>) -> Option<OperandLocation> {
+		idx.map(|child| self.get_operand_loc(child))
+	}
+
+	/// Update the `hovered_child` field of the given `state`. If `position_over` is over an
+	/// operand, sets `hovered_child` to that child; otherwise sets it to `None`.
+	fn update_hovered_child(&self, state: &mut State, position_over: Option<Point>,
+	layout: &Layout) {
+		if let Some(position) = position_over {
+			state.hovered_child = self.operand_at_position(position, layout);
+		} else {
+			state.hovered_child = None;
 		}
 	}
 }
@@ -597,52 +655,32 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 		shell: &mut Shell<'_, CodeViewMessage>,
 		_viewport: &Rectangle,
 	) {
+		// ----------------------------------------------------------------------------------------
+		// Check for hovering
+
 		let old_hovered_child = tree.state.downcast_ref::<State>().hovered_child;
-		let old_operand_loc = old_hovered_child.map(|child| self.get_operand_loc(child));
-		let position_over = cursor.position_over(layout.bounds());
+		let old_hovered_loc   = self.operand_loc_of(old_hovered_child);
+		let position_over     = cursor.position_over(layout.bounds());
 
-		// 1. see if mouse cursor is over
-		if let Some(position) = position_over {
-			// 2. if it is, see which child it's over
-			tree.state.downcast_mut::<State>().hovered_child = self
-				.child_at_position(position, &layout)
-				.and_then(|child_idx| {
-					if self.spans[child_idx.0].opn.is_some() {
-						Some(child_idx)
-					} else {
-						None
-					}
-				});
-		} else {
-			tree.state.downcast_mut::<State>().hovered_child = None;
-		}
+		self.update_hovered_child(tree.state.downcast_mut::<State>(), position_over, &layout);
 
-		// 3. from that, look at self.spans to see if we should emit messages
-		//    - hover messages (need to remember last-hovered span)
-		//    - click messages
-		//    - double-click messages
-		let state = tree.state.downcast_ref::<State>();
-		if old_hovered_child != state.hovered_child {
+		let new_hovered_child = tree.state.downcast_ref::<State>().hovered_child;
+		if old_hovered_child != new_hovered_child {
 			shell.request_redraw();
-
-			let new_operand_loc = state.hovered_child.map(|child| self.get_operand_loc(child));
-
-			if old_operand_loc != new_operand_loc {
-
-				if let Some(old_child) = old_hovered_child {
-					self.publish_child_message(old_child, shell,
-						|loc| CodeViewMessage::OperandHovered { loc, over: false });
-				}
-
-				if let Some(new_child) = state.hovered_child {
-					self.publish_child_message(new_child, shell,
-						|loc| CodeViewMessage::OperandHovered { loc, over: true });
-				}
+			// two children can have the same operand location, so have to check for that too
+			if old_hovered_loc != self.operand_loc_of(new_hovered_child) {
+				self.maybe_publish_child_message(old_hovered_child, shell,
+					CodeViewMessage::operand_hovered_out);
+				self.maybe_publish_child_message(new_hovered_child, shell,
+					CodeViewMessage::operand_hovered_over);
 			}
 		}
 
 		let state = tree.state.downcast_mut::<State>();
 		match event {
+			// ------------------------------------------------------------------------------------
+			// Check for clicks
+
 			Event::Mouse(MouseEvent::ButtonPressed(MouseButton::Left)) => {
 				if state.hovered_child.is_some() {
 					state.pressed_child = state.hovered_child;
@@ -674,17 +712,21 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 
 				state.pressed_child = None;
 			}
+
+			// ------------------------------------------------------------------------------------
+			// Check for keyboard cursor movement
+
 			Event::Keyboard(KeyboardEvent::KeyPressed { key, modifiers, .. })
 			if *modifiers == KeyModifiers::NONE => {
 				// TODO: this code is extremely similar to the hovering code above. possible to
 				// abstract it?
-				let state = tree.state.downcast_mut::<State>();
 				let old_focused_child = state.focused_child;
-				let old_operand_loc = old_focused_child.map(|child| self.get_operand_loc(child));
+				let old_focused_loc   = self.operand_loc_of(old_focused_child);
 
 				if let Some(line_cursor) = &mut state.line_cursor {
 					match key {
 						// TODO: hold ctrl for moving left and right by span
+						// TODO: home/end
 						Key::Named(NamedKey::ArrowLeft) => {
 							if self.move_cursor(line_cursor, -1, &layout) {
 								shell.request_redraw();
@@ -695,39 +737,26 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 								shell.request_redraw();
 							}
 						}
+						Key::Named(NamedKey::Enter) => {
+							self.maybe_publish_child_message(
+								self.operand_at_char_index(line_cursor.idx), shell,
+								CodeViewMessage::operand_pressed);
+						}
 						_ => {}
 					}
 				}
 
-				if let Some(LineCursor { idx, .. }) = state.line_cursor {
-					state.focused_child = self
-						.child_at_char_index(idx)
-						.and_then(|child_idx| {
-							if self.spans[child_idx.0].opn.is_some() {
-								Some(child_idx)
-							} else {
-								None
-							}
-						});
-				} else {
-					state.focused_child = None;
-				}
+				state.focused_child = state.line_cursor.as_ref()
+					.and_then(|cursor| self.operand_at_char_index(cursor.idx));
 
-				if old_focused_child != state.focused_child {
-					let new_operand_loc =
-						state.focused_child.map(|child| self.get_operand_loc(child));
-
-					if old_operand_loc != new_operand_loc {
-						if let Some(old_child) = old_focused_child {
-							self.publish_child_message(old_child, shell,
-								|loc| CodeViewMessage::OperandFocused { loc, over: false });
-						}
-
-						if let Some(new_child) = state.focused_child {
-							self.publish_child_message(new_child, shell,
-								|loc| CodeViewMessage::OperandFocused { loc, over: true });
-						}
-					}
+				// don't need to request a redraw here like for mouse hovering, since the checks
+				// for move_cursor above already did that
+				if old_focused_child != state.focused_child
+				&& old_focused_loc != self.operand_loc_of(state.focused_child) {
+					self.maybe_publish_child_message(old_focused_child, shell,
+						CodeViewMessage::operand_focused_out);
+					self.maybe_publish_child_message(state.focused_child, shell,
+						CodeViewMessage::operand_focused_over);
 				}
 			}
 			_ => {}
