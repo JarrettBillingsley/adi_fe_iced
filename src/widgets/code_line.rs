@@ -340,10 +340,17 @@ impl<'a> CodeLine<'a> {
 		(Rectangle::with_size(Size::new(width, height)), nodes)
 	}
 
-	fn char_width(&self, root_layout: &Layout) -> f32 {
-		// this feels janktastic but it works.
-		// SAFETY: always have children
-		root_layout.children().nth(0).unwrap().bounds().width / self.spans[0].len as f32
+	/// Get the pixel width of a single character, or `None` if the current line is empty. (There
+	/// has to be a better way to do this)
+	fn char_width(&self, root_layout: &Layout) -> Option<f32> {
+		// blank line?
+		if self.spans[0].len == 0 {
+			None
+		} else {
+			// this feels janktastic but it works.
+			// SAFETY: always have children
+			Some(root_layout.children().nth(0).unwrap().bounds().width / self.spans[0].len as f32)
+		}
 	}
 
 	// --------------------------------------------------------------------------------------------
@@ -384,7 +391,12 @@ impl<'a> CodeLine<'a> {
 	// --------------------------------------------------------------------------------------------
 	// Cursor stuff
 
+	/// Get the index of the child, if any, under the given `Point`.
+	///
+	/// Panics if `position` is not in `layout`
 	fn child_at_position(&self, position: Point, layout: &Layout) -> Option<ChildIdx> {
+		assert!(layout.bounds().contains(position));
+
 		for (i, layout) in layout.children().enumerate() {
 			if layout.bounds().contains(position) {
 				return Some(ChildIdx(i))
@@ -393,26 +405,47 @@ impl<'a> CodeLine<'a> {
 		None
 	}
 
+	/// Given a `Point` inside this line's layout, compute the character index and cursor rectangle
+	/// to place the cursor at the character under that point. If `position` is past the last
+	/// character on the line, places the cursor immediately after the last character.
+	///
+	/// Panics if `position` is not in `layout`
 	fn position_to_cursor(&self, position: Point, layout: &Layout) -> LineCursor {
 		assert!(layout.bounds().contains(position));
+		self.compute_line_cursor(layout, |bounds, char_width| {
+			if let Some(char_width) = char_width {
+				let position_in = position - bounds.position();
+				let rightmost   = self.total_len as f32 * char_width;
+				let xpos        = position_in.x.min(rightmost);
+				(xpos / char_width) as usize
+			} else {
+				// this happens on blank lines, currently.
+				0
+			}
+		})
+	}
 
-		let bounds      = layout.bounds();
-		let char_width  = self.char_width(layout);
-		let position_in = position - bounds.position();
-		let idx         = (position_in.x / char_width) as usize;
-		LineCursor {
-			idx,
-			bounds: Rectangle::new(
-				bounds.position() + Vector::new((idx as f32) * char_width, 0.0),
-				Size::new(char_width, bounds.height)
-			)
+	/// Tries to change `line_cursor.idx` by `delta`; returns `true` if the cursor moved.
+	fn move_cursor(&self, line_cursor: &mut LineCursor, delta: isize, layout: &Layout) -> bool {
+		let idx = ((line_cursor.idx as isize) + delta)
+			.clamp(0, self.total_len as isize) as usize;
+
+		if idx != line_cursor.idx {
+			*line_cursor = self.compute_line_cursor(layout, |_, _| idx);
+			true
+		} else {
+			false
 		}
 	}
 
-	fn idx_to_cursor(&self, idx: usize, layout: &Layout) -> LineCursor {
-		let bounds = layout.bounds();
-		let char_width = self.char_width(layout);
-
+	fn compute_line_cursor<F>(&self, layout: &Layout, idxfn: F) -> LineCursor
+	where
+		F: Fn(Rectangle, Option<f32>) -> usize,
+	{
+		let char_width  = self.char_width(layout);
+		let bounds      = layout.bounds();
+		let idx         = idxfn(bounds, char_width);
+		let char_width  = char_width.unwrap_or(0.0);
 		LineCursor {
 			idx,
 			bounds: Rectangle::new(
@@ -428,7 +461,11 @@ impl<'a> CodeLine<'a> {
 // ------------------------------------------------------------------------------------------------
 
 struct LineCursor {
+	/// 0-based character index of where the cursor is on the line. NOTE: this may be >= the line's
+	/// total length! in that case the cursor is after the printing characters.
 	idx:    usize,
+
+	/// rectangle to be drawn to represent the cursor.
 	bounds: Rectangle,
 }
 
@@ -619,14 +656,12 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 					match key {
 						// TODO: hold ctrl for moving left and right by span
 						Key::Named(NamedKey::ArrowLeft) => {
-							if line_cursor.idx > 0 {
-								*line_cursor = self.idx_to_cursor(line_cursor.idx - 1, &layout);
+							if self.move_cursor(line_cursor, -1, &layout) {
 								shell.request_redraw();
 							}
 						}
 						Key::Named(NamedKey::ArrowRight) => {
-							if line_cursor.idx < self.total_len - 1 {
-								*line_cursor = self.idx_to_cursor(line_cursor.idx + 1, &layout);
+							if self.move_cursor(line_cursor, 1, &layout) {
 								shell.request_redraw();
 							}
 						}
