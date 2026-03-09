@@ -405,6 +405,20 @@ impl<'a> CodeLine<'a> {
 		None
 	}
 
+	/// Get the index of the child, if any, at the given character index.
+	fn child_at_char_index(&self, char_idx: usize) -> Option<ChildIdx> {
+		let child_idx = match self.spans.binary_search_by_key(&char_idx, |span| span.start) {
+			Ok(child_idx) => child_idx,
+			Err(would_be) => would_be - 1,
+		};
+
+		if child_idx < self.spans.len() {
+			Some(ChildIdx(child_idx))
+		} else {
+			None
+		}
+	}
+
 	/// Given a `Point` inside this line's layout, compute the character index and cursor rectangle
 	/// to place the cursor at the character under that point. If `position` is past the last
 	/// character on the line, places the cursor immediately after the last character.
@@ -472,10 +486,21 @@ struct LineCursor {
 struct State {
 	content_bounds: Rectangle,
 	layouts:        Vec<Node>,
+
+	/// which child, if any, the mouse is hovering over.
 	hovered_child:  Option<ChildIdx>,
+
+	/// which child, if any, the user pressed the left mouse button on.
 	pressed_child:  Option<ChildIdx>,
+
+	/// the previous mouse click (used for detecting double-clicks).
 	previous_click: Option<Click>,
+
+	/// if the text cursor is on this line, where it is.
 	line_cursor:    Option<LineCursor>,
+
+	/// which child, if any, the text cursor is over.
+	focused_child:  Option<ChildIdx>,
 }
 
 impl State {
@@ -509,6 +534,7 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			pressed_child:  None,
 			previous_click: None,
 			line_cursor:    None,
+			focused_child:  None,
 		})
 	}
 
@@ -650,7 +676,11 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 			}
 			Event::Keyboard(KeyboardEvent::KeyPressed { key, modifiers, .. })
 			if *modifiers == KeyModifiers::NONE => {
+				// TODO: this code is extremely similar to the hovering code above. possible to
+				// abstract it?
 				let state = tree.state.downcast_mut::<State>();
+				let old_focused_child = state.focused_child;
+				let old_operand_loc = old_focused_child.map(|child| self.get_operand_loc(child));
 
 				if let Some(line_cursor) = &mut state.line_cursor {
 					match key {
@@ -666,6 +696,37 @@ impl Widget<CodeViewMessage, iced::Theme, iced::Renderer> for CodeLine<'_> {
 							}
 						}
 						_ => {}
+					}
+				}
+
+				if let Some(LineCursor { idx, .. }) = state.line_cursor {
+					state.focused_child = self
+						.child_at_char_index(idx)
+						.and_then(|child_idx| {
+							if self.spans[child_idx.0].opn.is_some() {
+								Some(child_idx)
+							} else {
+								None
+							}
+						});
+				} else {
+					state.focused_child = None;
+				}
+
+				if old_focused_child != state.focused_child {
+					let new_operand_loc =
+						state.focused_child.map(|child| self.get_operand_loc(child));
+
+					if old_operand_loc != new_operand_loc {
+						if let Some(old_child) = old_focused_child {
+							self.publish_child_message(old_child, shell,
+								|loc| CodeViewMessage::OperandFocused { loc, over: false });
+						}
+
+						if let Some(new_child) = state.focused_child {
+							self.publish_child_message(new_child, shell,
+								|loc| CodeViewMessage::OperandFocused { loc, over: true });
+						}
 					}
 				}
 			}

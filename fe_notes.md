@@ -3,32 +3,18 @@
 
 - now that I'm no longer using `Rich` for code...
 	- currently using vanilla `Column` for lines of code and `Row` for the contents of (some) lines
-	- but in order to support a **virtual cursor** I'd kinda need to have my own versions of those?
+	- but in order to support a **text cursor** I'd kinda need to have my own versions of those?
 	- thinking like...
 		- `CodeLine` is a single line of code, column-based
-			- Basically that `LineKind` enum would become the kind of `CodeLine`
-			- It also supports the **virtual cursor** by knowing which column it's on
-			- It knows:
-				- How many characters are on the line
-				- For each character index, what it corresponds to
-					- like a tiny `SpanMap` of things
-					- but just implemented as a list of (char_idx, Thing) - linear search will be more than good enough cause n is unlikely to be more than 5 or so
-				- So e.g. on this line:
-					
-					PRG0:8040 03 c3 9a    jmp PRG0_loc_9AC3
-					|        <empty>          | operand 0 |
-				- This can then be used to:
-					- implement the virtual cursor (different actions depending on X position)
-					- implement mouse events (mouse X -> character index, look up what's there, send hover/leave/click events)
 		- `CodeBlock` is a list of `CodeLine`s
-			- Supports the **virtual cursor** by knowing which line it's on
+			- Supports the **text cursor** by knowing which line it's on
 		- `CodeView` ties it all together
 			- Has the `SparseList` of `CodeBlocks`
-			- Supports the **virtual cursor** by knowing which `CodeBlock` it's in (even if it's offscreen)
-	- The **virtual cursor:**
-		- clicking enables and places it 
+			- Supports the **text cursor** by knowing which `CodeBlock` it's in (even if it's offscreen)
+	- The **text cursor:**
+		- clicking enables and places it
 			- and hides mouse cursor?
-			- and then moving mouse disables **virtual cursor**?
+			- and then moving mouse disables **text cursor**?
 		- current line/column, arrow keys move it
 		- some lines are "real" (e.g. instructions, unknown/data bytes); other are "fake" (e.g. comments on instructions)
 			- tho the "fake" ones are usually attached to a real one with an EA
@@ -40,8 +26,8 @@
 	- then when autoanalysis ends, if any did, just have it refresh
 	- OR.... rather than blocking out the code listing while analysis happens, have a Futures-based response model for backend queries
 - when span change event comes in, `SparseList` should:
-	- try to keep current **virtual cursor** position at the same Y coord
-	- if there's no **virtual cursor** position, try to keep topmost visible line at the same Y coord
+	- try to keep current **text cursor** position at the same Y coord
+	- if there's no **text cursor** position, try to keep topmost visible line at the same Y coord
 	- both of these kind of imply a deeper connection between `SparseList` and its content...
 		- which makes it less reusable for e.g. the name list
 		- maybe there can be a `CodeView` which *uses* a `SparseList`?
@@ -64,7 +50,7 @@
 - JANK:
 	- short view, scroll to bottom, expand height -> items stay at top of view, until you scroll again. at least it doesn't crash
 	- if you contract a visible BB, it pulls items up at first... but doesn't spawn new items after, and starts pulling the top of the BB down instead. why?
-	
+
 ---
 
 ## IDA Keybindings and my thoughts on them
@@ -98,6 +84,15 @@
 
 so what if...
 
+- **Enter** - navigate to
+- **Esc** - back
+- **G**oto
+- **X**ref
+- re**N**ame
+- **C**ode
+- **D**ata
+- **U**ndefine
+- **O**ffset
 - **T**ype lets you choose type for a variable or blob o' bytes or whatever
 - **F**unction starts/splits offs a new function
 	- **Shift+F** sets the end of a function

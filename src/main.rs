@@ -284,6 +284,7 @@ impl AdiFE {
 		use CodeViewMessage::*;
 		match cvm {
 			OperandHovered { loc, over } => {
+				// TODO: this and OperandFocused need to interact in a more subtle way
 				if over {
 					self.cur_operand = Some(loc);
 					println!("TODO: hovered over BB {:?} instruction #{} operand #{}",
@@ -297,6 +298,16 @@ impl AdiFE {
 				println!("TODO: {}-clicked BB {:?} instruction #{} operand #{}",
 					if double { "double" } else { "single" },
 					loc.bb_ea, loc.instn, loc.opn);
+			}
+			OperandFocused { loc, over } => {
+				if over {
+					self.cur_operand = Some(loc);
+					println!("TODO: text cursor moved over BB {:?} instruction #{} operand #{}",
+						loc.bb_ea, loc.instn, loc.opn);
+				} else if let Some(cur_operand) = self.cur_operand && cur_operand == loc {
+					self.cur_operand = None;
+					println!("TODO: text cursor over nothing");
+				}
 			}
 			JumpTo { ea } => {
 				self.code_pane_mut().set_segment(ea.seg());

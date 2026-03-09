@@ -27,12 +27,22 @@ pub(crate) struct OperandLocation {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CodeViewMessage {
+	/// The mouse cursor either hovered over an operand (if `over` is `true`) or stopped hovering
+	/// over one.
 	OperandHovered { loc: OperandLocation, over: bool },
+	/// The user clicked on an operand. `double` is `true` for double-clicks and `false` for single.
 	OperandClicked { loc: OperandLocation, double: bool },
+	/// The text cursor either moved onto an operand (if `over` is `true`) or moved off of one.
+	OperandFocused { loc: OperandLocation, over: bool },
+	/// Jump to an EA (focus it in the `CodeView`).
 	JumpTo { ea: EA },
+	/// Switch which segment the `CodeView` is viewing. Jumps to the first EA of the segment.
 	SwitchSegment { id: SegId },
+	/// Jump to the top (first EA) of the currently-viewed segment.
 	JumpToTop,
+	/// Jump to the bottom (last EA) of the currently-viewed segment.
 	JumpToBottom,
+	/// FOR TESTING: scroll the `CodeView` up or down a bit.
 	Scroll { up: bool },
 }
 
