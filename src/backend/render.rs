@@ -2,7 +2,7 @@
 use std::fmt::{ Write as FmtWrite };
 
 use adi::{ EA, Program, Span, SpanKind, ImageSliceable,
-	BasicBlock, DataItem, IPrintOutput, PrintStyle, FmtResult };
+	BasicBlock, DataItem, IPrintOutput, PrintStyle, OperandIdx, FmtResult };
 
 use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
 	CodeOpData, UnknownData, UnknownLineData, FuncData, FuncDataKind };
@@ -181,7 +181,7 @@ struct UIRenderOutput {
 	operands:   Vec<CodeOpData>,
 	tmp_str:    String,
 	tmp_style:  Option<PrintStyle>,
-	tmp_opn:    Option<u8>,
+	tmp_opn:    Option<OperandIdx>,
 }
 
 impl UIRenderOutput {
@@ -230,10 +230,6 @@ impl IPrintOutput for UIRenderOutput {
 				self.tmp_style = Some(style);
 			}
 
-			Operand(opn) => {
-				self.tmp_opn = Some(opn as u8);
-			}
-
 			_ => todo!("a new PrintStyle was added!"),
 		}
 
@@ -253,18 +249,25 @@ impl IPrintOutput for UIRenderOutput {
 					self.tmp_opn)); // works regardless of if we're in an operand
 			}
 
-			Operand(opn) => {
-				self.tmp_opn = None;
-
-				if !self.tmp_str.is_empty() {
-					self.operands.push(CodeOpData::new(std::mem::take(&mut self.tmp_str),
-						self.tmp_style,
-						Some(opn as u8)));
-				}
-			}
-
 			_ => todo!("a new PrintStyle was added!"),
 		}
+		Ok(())
+	}
+
+	fn begin_operand(&mut self, opn: OperandIdx) -> FmtResult {
+		self.tmp_opn = Some(opn);
+		Ok(())
+	}
+
+	fn end_operand(&mut self, opn: OperandIdx) -> FmtResult {
+		self.tmp_opn = None;
+
+		if !self.tmp_str.is_empty() {
+			self.operands.push(CodeOpData::new(std::mem::take(&mut self.tmp_str),
+				self.tmp_style,
+				Some(opn as u8)));
+		}
+
 		Ok(())
 	}
 }

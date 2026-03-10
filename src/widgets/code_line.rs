@@ -44,10 +44,8 @@ impl From<PrintStyle> for PrintStyleEx {
 
 impl From<Option<PrintStyle>> for PrintStyleEx {
 	fn from(other: Option<PrintStyle>) -> Self {
-		use PrintStyle::*;
 		match other {
 			None             => Self::Plain,
-			Some(Operand(_)) => panic!("trying to turn operand into a style"),
 			Some(ps)         => Self::Adi(ps),
 		}
 	}
@@ -75,7 +73,6 @@ fn color_of(style: impl Into<PrintStyleEx>) -> IcedColor {
 		Adi(Comment)    => color!(0x00AF00), // dark green
 		Adi(Refname)    => color!(0xFFFFB0), // light tan
 		Adi(Label)      => color!(0xA06000), // light brown
-		Adi(Operand(_)) => panic!("trying to get the color of an operand"),
 		Adi(_)          => panic!("a new PrintStyle was added!"),
 	}
 }
