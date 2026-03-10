@@ -22,7 +22,7 @@ use iced::{
 	},
 };
 
-use adi::{ SegId, Image };
+use adi::{ EA, SegId, Image };
 
 use simplelog::{ *, Color as SimpleLogColor };
 use log::*;
@@ -314,12 +314,7 @@ impl AdiFE {
 					loc.bb_ea, loc.instn, loc.opn);
 			}
 			JumpTo { ea } => {
-				self.code_pane_mut().set_segment(ea.seg());
-
-				return operation::scroll_to(CodePane::CODEVIEW_ID, AbsoluteOffset {
-					y: Some(f32::from_bits(ea.offs() as u32)), // item index
-					x: Some(80.0),                             // pixel offset from top
-				});
+				return self.jump_to(ea);
 			}
 			SwitchSegment { id } => {
 				self.code_pane_mut().set_segment(id);
@@ -353,11 +348,16 @@ impl AdiFE {
 		Task::none()
 	}
 
-	fn check_for_events(&self) -> Task<Message> {
+	fn check_for_events(&mut self) -> Task<Message> {
 		for event in self.backend.pending_events() {
 			use BackendEvent::*;
 
 			match event {
+				ImageLoaded { start_ea } => {
+					println!("image loaded, start EA = {:?}", start_ea);
+					return self.jump_to(start_ea);
+				}
+
 				SegmentChanged { ea, ev } => {
 					println!("segment changed {:?} {:?}", ea, ev);
 					self.code_pane().dispatch_event(ea, ev);
@@ -374,6 +374,15 @@ impl AdiFE {
 		}
 
 		Task::none()
+	}
+
+	fn jump_to(&mut self, ea: EA) -> Task<Message> {
+		self.code_pane_mut().set_segment(ea.seg());
+
+		operation::scroll_to(CodePane::CODEVIEW_ID, AbsoluteOffset {
+			y: Some(f32::from_bits(ea.offs() as u32)), // item index
+			x: Some(80.0),                             // pixel offset from top
+		})
 	}
 
 	fn view(&self) -> Element<'_, Message> {

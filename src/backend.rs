@@ -38,6 +38,10 @@ pub enum SegmentChangedEvent {
 #[non_exhaustive]
 #[derive(Copy, Clone)]
 pub enum BackendEvent {
+	/// Sent right after the backend is created, when the image has been loaded. `start_ea` is the
+	/// address of the starting point of the program, so the UI can focus it.
+	ImageLoaded { start_ea: EA },
+
 	/// A segment's span map changed.
 	SegmentChanged {
 		/// The EA of the span which changed.
@@ -74,10 +78,10 @@ impl Backend {
 		let success_clone = success.clone();
 
 		ThreadBuilder::new().name("backend thread".into()).spawn(move || {
-			let prog = match adi::program_from_image(image) {
-				Ok(prog) => {
+			let (prog, start_ea) = match adi::program_from_image(image) {
+				Ok(tuple) => {
 					success_clone.set(Ok(())).unwrap();
-					prog
+					tuple
 				}
 				Err(err) => {
 					success_clone.set(Err(err)).unwrap();
@@ -85,7 +89,7 @@ impl Backend {
 				}
 			};
 
-			BackendThread { event_tx, command_rx }.main_loop(prog);
+			BackendThread { event_tx, command_rx }.main_loop(prog, start_ea);
 		}).expect("failed to spawn backend thread!");
 
 		success.wait().clone().map(|_| Self { event_rx, command_tx })
@@ -166,7 +170,7 @@ fn respond<T>(tx: OneshotSender<T>, response: T) {
 }
 
 impl BackendThread {
-	fn main_loop(self, mut prog: Program) {
+	fn main_loop(self, mut prog: Program, start_ea: EA) {
 		// TODO: temporary
 		let state = prog.initial_mmu_state();
 		prog.enqueue_new_func(state, prog.ea_from_name("VEC_RESET"));
@@ -183,6 +187,9 @@ impl BackendThread {
 			let listener = Box::new(SegmentListener::new(&self.event_tx, id));
 			prog.segment_from_id_mut(id).attach_listener(Some(listener));
 		}
+
+		// let the frontend know!
+		self.event(BackendEvent::ImageLoaded { start_ea });
 
 		// this method is defined by "invoke_with_tokens!(backend_thread_command_loop..." below
 		self.command_loop(prog);
