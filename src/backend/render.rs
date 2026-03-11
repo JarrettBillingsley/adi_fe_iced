@@ -40,13 +40,13 @@ fn render_bb_header(prog: &Program, bb: &BasicBlock) -> Option<FuncData> {
 
 	bb_func_differs_from_previous(prog, bb).then(|| {
 		FuncData {
-			name: prog.name_of_ea(func.ea()),
+			name: prog.name_of_ea(func.ea()).name.into_owned(),
 			kind: if bb.id() == func.head_id() {
 				FuncDataKind::Head {
 					attrs: (!func.attrs().is_empty()).then(|| format!("{:?}", func.attrs())),
 					entrypoints: func.is_multi_entry().then(||
 					func.entrypoints().iter()
-						.map(|bbid| prog.name_of_ea(prog.get_bb(*bbid).ea()))
+						.map(|bbid| prog.name_of_ea(prog.get_bb(*bbid).ea()).name.into_owned())
 						.collect::<Vec<_>>()
 						.join(", "))
 				}
@@ -94,7 +94,7 @@ fn render_bb_code(prog: &Program, bb: &BasicBlock) -> Vec<CodeLineData> {
 fn render_bb(prog: &Program, bb: &BasicBlock) -> CodeViewItem {
 	let func_header = render_bb_header(prog, bb);
 	let label = if prog.get_inrefs(bb.ea()).is_some() {
-		prog.name_of_ea(bb.ea())
+		prog.name_of_ea(bb.ea()).name.into_owned()
 	} else {
 		"".to_string()
 	};

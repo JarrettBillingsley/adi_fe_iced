@@ -216,7 +216,7 @@ export_backend_commands! {
 	/// Get all names. The returned vector is a tuple of each name's [`EA`] and the name itself.
 	pub fn get_all_names(self: &Self) -> Vec<NameListData> {
 		prog.all_names_by_ea()
-			.map(|(ea, name)| NameListData { name: name.clone(), ea: *ea })
+			.map(|(ea, name)| NameListData { name: name.name.into_owned(), ea: ea })
 			.collect::<Vec<_>>()
 	}
 
