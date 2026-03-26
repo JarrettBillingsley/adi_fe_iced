@@ -5,7 +5,7 @@ use std::thread::{ Builder as ThreadBuilder };
 
 use oneshot::{ Sender as OneshotSender, channel as oneshot_channel };
 
-use adi::{ EA, VA, SegId, PlatformResult, Image, Program, Span, Type, SpanMapListener };
+use adi::{ Size, Offs, EA, SegId, PlatformResult, Image, Program, Span, SpanMapListener };
 
 use crate::ui::{ CodeViewItem, SegmentData, NameListData };
 
@@ -132,7 +132,7 @@ impl SegmentListener {
 		}
 	}
 
-	fn event(&self, offs: usize, ev: SegmentChangedEvent) {
+	fn event(&self, offs: Offs, ev: SegmentChangedEvent) {
 		self.event_tx.send(BackendEvent::SegmentChanged {
 			ea: EA::new(self.id, offs),
 			ev
@@ -141,13 +141,13 @@ impl SegmentListener {
 }
 
 impl SpanMapListener for SegmentListener {
-	fn span_added(&self, offs: usize) {
+	fn span_added(&self, offs: u64) {
 		self.event(offs, SegmentChangedEvent::Add);
 	}
-	fn span_removed(&self, offs: usize) {
+	fn span_removed(&self, offs: u64) {
 		self.event(offs, SegmentChangedEvent::Remove);
 	}
-	fn span_changed(&self, offs: usize) {
+	fn span_changed(&self, offs: u64) {
 		self.event(offs, SegmentChangedEvent::Change);
 	}
 }
@@ -173,12 +173,9 @@ impl BackendThread {
 	fn main_loop(self, mut prog: Program, start_ea: EA) {
 		// TODO: temporary
 		let state = prog.initial_mmu_state();
-		prog.enqueue_new_func(state, prog.ea_from_name("VEC_RESET"));
-		prog.enqueue_new_func(state, prog.ea_from_name("VEC_NMI"));
-		let ty = Type::ptr(Type::Code, Type::U16);
-		prog.new_data(Some("VEC_NMI_PTR"),   prog.ea_from_va(state, VA(0xFFFA)), ty.clone(), 2);
-		prog.new_data(Some("VEC_RESET_PTR"), prog.ea_from_va(state, VA(0xFFFC)), ty.clone(), 2);
-		prog.new_data(Some("VEC_IRQ_PTR"),   prog.ea_from_va(state, VA(0xFFFE)), ty.clone(), 2);
+		prog.enqueue_new_func(state, start_ea);
+		// prog.enqueue_new_func(state, prog.ea_from_name("VEC_RESET"));
+		// prog.enqueue_new_func(state, prog.ea_from_name("VEC_NMI"));
 		prog.analyze_queue();
 
 		// set these up *after* the initial analysis so as not to flood the UI with events.
@@ -235,7 +232,7 @@ export_backend_commands! {
 	}
 
 	/// Gets the number of spans in `seg`.
-	pub fn get_num_spans(self: &Self, seg: SegId) -> usize {
+	pub fn get_num_spans(self: &Self, seg: SegId) -> Size {
 		prog.segment_from_id(seg).num_spans()
 	}
 
@@ -245,7 +242,7 @@ export_backend_commands! {
 	}
 
 	/// Get the offset of the last span in `seg`.
-	pub fn get_last_span_offset(self: &Self, seg: SegId) -> usize {
+	pub fn get_last_span_offset(self: &Self, seg: SegId) -> Offs {
 		prog.segment_from_id(seg).last_span_offset()
 	}
 

@@ -1,7 +1,7 @@
 
 use std::fmt::{ Write as FmtWrite };
 
-use adi::{ EA, Program, Span, SpanKind, ImageSliceable,
+use adi::{ Offs, EA, Program, Span, SpanKind, ImageSliceable,
 	BasicBlock, DataItem, IPrintOutput, PrintStyle, OperandIdx, FmtResult };
 
 use crate::ui::{ TextEA, CodeViewItem, BasicBlockData, CodeLineData,
@@ -135,7 +135,7 @@ fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
 	}];
 
 	if seg.is_real() {
-		let len = span.len().min(UNK_SIZE_CUTOFF);
+		let len = span.len().min(UNK_SIZE_CUTOFF as Offs);
 		let slice = seg.image_slice(ea .. ea + len);
 		let data = slice.data();
 		let mut addr = prog.fmt_addr(va.0);
@@ -150,9 +150,9 @@ fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
 				bytes.push_str(&format!(" {:02X}", byte));
 			}
 
-			addr = prog.fmt_addr(va.0 + i * UNK_STRIDE);
+			addr = prog.fmt_addr(va.0 + (i * UNK_STRIDE) as Offs);
 			lines.push(UnknownLineData {
-				ea:      ea + i,
+				ea:      ea + i as Offs,
 				text_ea: TextEA::new(seg_name, &addr),
 				bytes,
 			});
@@ -160,9 +160,9 @@ fn render_unk(prog: &Program, span: &Span) -> CodeViewItem {
 			last_i = i;
 		}
 
-		if span.len() > UNK_SIZE_CUTOFF {
+		if span.len() > UNK_SIZE_CUTOFF as Offs {
 			lines.push(UnknownLineData {
-				ea:      ea + last_i,
+				ea:      ea + last_i as Offs,
 				text_ea: TextEA::new(seg_name, &addr),
 				bytes:   "...".into(),
 			});

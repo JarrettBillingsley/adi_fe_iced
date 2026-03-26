@@ -53,7 +53,7 @@
 	- **X**ref                (beautiful)
 	- re**N**ame              (though I like Ghidra's **L**abel for this too)
 	- **C**ode                (perfect)
-	- **D**ata                (yep)
+	- **D**ata                (yep, also cycles data size (byte, short, int))
 	- **U**ndefine            (mhm)
 	- **O**ffset              (yep)
 - works but not married to it
@@ -81,7 +81,7 @@ so what if...
 - **X**ref
 - re**N**ame
 - **C**ode
-- **D**ata
+- **D**ata (cycles data size)
 - **U**ndefine
 - **O**ffset
 - **T**ype lets you choose type for a variable or blob o' bytes or whatever

@@ -3,7 +3,7 @@ use std::rc::{ Rc };
 
 use iced::{ Element, widget::{ Column } };
 
-use adi::{ EA, SegId };
+use adi::{ Size, Offs, EA, SegId };
 
 use crate::backend::{ Backend, SegmentChangedEvent };
 use crate::ui::*;
@@ -252,34 +252,31 @@ impl CodeView {
 	}
 }
 
-// just to keep my thoughts straight
-type SegOffs = usize;
-
 impl<'a> IContent<'a, EA> for CodeView {
-	fn len(&self) -> usize {
+	fn len(&self) -> Size {
 		self.backend.get_num_spans(self.id)
 	}
 
-	fn first_index(&self) -> Option<SegOffs> {
+	fn first_index(&self) -> Option<Offs> {
 		// by definition
 		Some(0)
 	}
 
-	fn last_index(&self) -> Option<SegOffs> {
+	fn last_index(&self) -> Option<Offs> {
 		Some(self.backend.get_last_span_offset(self.id))
 	}
 
-	fn get(&self, idx: SegOffs) -> Option<EA> {
+	fn get(&self, idx: Offs) -> Option<EA> {
 		Some(self.backend.get_span(EA::new(self.id, idx)).start())
 	}
 
-	fn items_before(&'a self, idx: SegOffs)
-	-> Box<dyn Iterator<Item = (SegOffs, EA)> + 'a> {
+	fn items_before(&'a self, idx: Offs)
+	-> Box<dyn Iterator<Item = (Offs, EA)> + 'a> {
 		Box::new(SpansBefore { backend: self.backend.clone(), ea: EA::new(self.id, idx) })
 	}
 
-	fn items_after(&'a self, idx: SegOffs)
-	-> Box<dyn Iterator<Item = (SegOffs, EA)> + 'a> {
+	fn items_after(&'a self, idx: Offs)
+	-> Box<dyn Iterator<Item = (Offs, EA)> + 'a> {
 		Box::new(SpansAfter { backend: self.backend.clone(), ea: EA::new(self.id, idx) })
 	}
 
@@ -294,7 +291,7 @@ struct SpansAfter {
 }
 
 impl Iterator for SpansAfter {
-	type Item = (SegOffs, EA);
+	type Item = (Offs, EA);
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.backend.get_span_after(self.ea).map(|span| {
@@ -311,7 +308,7 @@ struct SpansBefore {
 }
 
 impl Iterator for SpansBefore {
-	type Item = (SegOffs, EA);
+	type Item = (Offs, EA);
 
 	fn next(&mut self) -> Option<Self::Item> {
 		self.backend.get_span_before(self.ea).map(|span| {

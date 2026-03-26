@@ -236,7 +236,7 @@ impl AdiFE {
 		let (mut panes, name_pane) = PaneState::new(PaneKind::new_name(backend.clone()));
 		let (code_pane, split) = panes.split(
 			PaneAxis::Vertical, name_pane, PaneKind::new_code(
-				SegId(3), // TODO: temporary
+				SegId(0), // TODO: temporary
 				backend.clone())).unwrap();
 		panes.resize(split, 0.2);
 
