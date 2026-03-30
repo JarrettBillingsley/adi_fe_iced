@@ -44,6 +44,7 @@ dependencies = [
  "nes_rom",
  "parse-display",
  "petgraph",
+ "rustc-hash 2.1.1",
  "simplelog",
  "smallvec",
 ]
